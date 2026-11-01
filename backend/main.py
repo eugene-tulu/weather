@@ -1,4 +1,5 @@
 import json
+import asyncio
 import time
 from typing import List, Optional
 
@@ -35,6 +36,7 @@ class PointQuery(BaseModel):
     products: List[str] = ["noaa-gfs-forecast"]
     variables: List[str] = ["temperature_2m"]
     maxLeadTimeHours: int = 24
+    initTime: Optional[str] = None
 
 
 class AnalysisQuery(BaseModel):
@@ -44,6 +46,15 @@ class AnalysisQuery(BaseModel):
     variables: List[str] = ["temperature_2m"]
     startTime: str
     endTime: str
+
+
+@app.get("/api/runs")
+async def runs(dataProductId: str, limit: int = 5):
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get("https://api.dynamical.org/v1/forecasts/runs", params={"dataProductId": dataProductId, "limit": limit})
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    return r.json()
 
 
 @app.get("/health")
@@ -90,6 +101,48 @@ async def product(product_id: str):
 
 @app.post("/api/point")
 async def point(q: PointQuery):
+    async def fetch_one(pid: str):
+        key = json.dumps({"lat": q.latitude, "lon": q.longitude, "product": pid, "variables": q.variables, "maxLead": q.maxLeadTimeHours, "initTime": q.initTime}, sort_keys=True)
+        row = db.execute("SELECT payload, ts FROM cache WHERE key = ?", [key]).fetchone()
+        if row and (time.time() - row[1]) < 600:
+            return json.loads(row[0])
+        payload = {
+            "queries": [{
+                "dataProductId": pid,
+                "location": {"latitude": q.latitude, "longitude": q.longitude},
+                "variables": q.variables,
+                "maxLeadTimeHours": q.maxLeadTimeHours,
+                **({"initTime": q.initTime} if q.initTime else {}),
+            }]
+        }
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(DYNAMICAL, json=payload)
+            if r.status_code != 200:
+                return {"product": pid, "status": "error", "error": r.text}
+            data = r.json()
+            res = (data.get("results") or [{}])[0]
+            res["status"] = "ok"
+            db.execute("INSERT OR REPLACE INTO cache (key, payload, ts) VALUES (?, ?, ?)", [key, json.dumps(res), time.time()])
+            return res
+        except Exception as e:
+            return {"product": pid, "status": "error", "error": str(e)}
+
+    results = await asyncio.gather(*[fetch_one(pid) for pid in q.products])
+    return {"results": list(results)}
+
+
+@app.get("/api/product/{product_id}")
+async def product(product_id: str):
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.get(f"https://api.dynamical.org/v1/data-products/{product_id}")
+    if r.status_code != 200:
+        raise HTTPException(status_code=r.status_code, detail=r.text)
+    return r.json()
+
+
+@app.post("/api/point")
+async def point(q: PointQuery):
     key = json.dumps(
         {
             "lat": q.latitude,
@@ -112,6 +165,7 @@ async def point(q: PointQuery):
             "location": {"latitude": q.latitude, "longitude": q.longitude},
             "variables": q.variables,
             "maxLeadTimeHours": q.maxLeadTimeHours,
+            **({"initTime": q.initTime} if q.initTime else {}),
         }
         for pid in q.products
     ]

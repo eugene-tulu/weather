@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -69,6 +69,7 @@ export default function Home() {
   const [maxLead, setMaxLead] = useState(48);
   const [snapshot, setSnapshot] = useState("latest");
   const [comparePrev, setComparePrev] = useState(false);
+  const [runOptions, setRunOptions] = useState<string[]>(["latest"]);
   const [tab, setTab] = useState<"fan" | "spaghetti" | "agreement" | "table">("fan");
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
@@ -77,6 +78,24 @@ export default function Home() {
   const [showHowTo, setShowHowTo] = useState(false);
 
   const varMeta = VARS.find((v) => v.id === variable) || VARS[0];
+  function modelValueAt(r: any, v: string, idx: number) {
+    if (isEnsemble(r)) {
+      const arr = (r._ensemble || []).map((m: any) => {
+        if (v === "wind_speed") {
+          const u = m.data?.wind_u_10m?.[idx]; const vv = m.data?.wind_v_10m?.[idx];
+          return (typeof u === "number" && typeof vv === "number") ? Math.sqrt(u * u + vv * vv) : null;
+        }
+        return m.data?.[v]?.[idx];
+      }).filter((x: any) => typeof x === "number");
+      return arr.length ? arr.reduce((a: number, b: number) => a + b, 0) / arr.length : null;
+    }
+    if (v === "wind_speed") {
+      const u = (r._data || {})["wind_u_10m"]?.[idx]; const vv = (r._data || {})["wind_v_10m"]?.[idx];
+      return (typeof u === "number" && typeof vv === "number") ? Math.sqrt(u * u + vv * vv) : null;
+    }
+    return (r._data || {})[v]?.[idx] ?? null;
+  }
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -95,6 +114,17 @@ export default function Home() {
   }, [q]);
 
   // URL state
+  useEffect(() => {
+    if (models.length === 0) return;
+    fetch(`${API}/api/runs?dataProductId=${models[0]}&limit=5`)
+      .then((r) => r.json())
+      .then((d) => {
+        const opts = (d.runs || []).map((x: any) => x.initTime);
+        if (opts.length) setRunOptions(opts);
+      })
+      .catch(() => {});
+  }, [models]);
+
   useEffect(() => {
     const p = new URLSearchParams(window.location.search);
     if (p.has("lat")) setLat(p.get("lat")!);
@@ -118,19 +148,20 @@ export default function Home() {
     setModels((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
 
-  async function fetchForecast() {
+  async function fetchForecast(ctrl?: AbortController) {
     if (models.length === 0) { setError("Select at least one model."); return; }
     setLoading(true); setError(null);
     try {
       const fetchVars = variable === "wind_speed" ? ["wind_u_10m", "wind_v_10m"] : [variable];
-      const res = await fetch(`${API}/api/point`, {
+      const res = await fetch(`${API}/api/point`, { signal: ctrl?.signal,
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ latitude: Number(lat), longitude: Number(lon), products: models, variables: fetchVars, maxLeadTimeHours: maxLead }),
+        body: JSON.stringify({ latitude: Number(lat), longitude: Number(lon), products: models, variables: fetchVars, maxLeadTimeHours: maxLead, initTime: snapshot === "latest" ? "latest" : snapshot }),
       });
       if (!res.ok) throw new Error(await res.text());
       const json = await res.json();
       (json.results || []).forEach((r: any) => {
+        if (r.status && r.status !== "ok") return;
         if (r.forecasts?.[0]) {
           r._times = r.forecasts[0].validTimes || [];
           r._data = r.forecasts[0].data || {};
@@ -157,6 +188,16 @@ export default function Home() {
     finally { setLoading(false); }
   }
 
+  useEffect(() => {
+    const ctrl = new AbortController();
+    abortRef.current?.abort();
+    abortRef.current = ctrl;
+    const t = setTimeout(() => {
+      fetchForecast(ctrl);
+    }, 400);
+    return () => { clearTimeout(t); ctrl.abort(); };
+  }, [lat, lon, variable, models, maxLead, snapshot]);
+
   function useMyLocation() {
     if (!navigator.geolocation) return;
     navigator.geolocation.getCurrentPosition((pos) => {
@@ -166,7 +207,7 @@ export default function Home() {
     });
   }
 
-  const results = data?.results || [];
+  const results = (data?.results || []).filter((r: any) => !r.status || r.status === "ok");
 
   function buildChartData() {
     const tsSet = new Set<string>();
@@ -370,7 +411,7 @@ export default function Home() {
 
       <div className="flex">
         {/* Left rail */}
-        <aside className="w-72 shrink-0 border-r border-border bg-card p-4 hidden md:block">
+        <aside className="w-72 shrink-0 border-r border-border bg-card p-4 md:block">
           <div className="space-y-4">
             <div>
               <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">Location</div>
@@ -435,16 +476,14 @@ export default function Home() {
             <div>
               <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">Snapshot</div>
               <select className="w-full border border-border rounded px-2 py-1 bg-background text-sm" value={snapshot} onChange={(e) => setSnapshot(e.target.value)}>
-                <option value="latest">Latest run</option>
-                <option value="previous">Previous run</option>
+                {runOptions.map((rt) => (
+                  <option key={rt} value={rt}>{rt}</option>
+                ))}
               </select>
-              <label className="flex items-center gap-2 text-xs mt-2">
-                <Checkbox checked={comparePrev} onCheckedChange={(v) => setComparePrev(!!v)} />
-                Compare to previous run
-              </label>
+
             </div>
 
-            <Button onClick={fetchForecast} disabled={loading} className="w-full">
+            <Button onClick={() => fetchForecast()} disabled={loading} className="w-full">
               {loading ? "Fetching…" : "Forecast"}
             </Button>
             {error && <div className="text-xs text-destructive">{error}</div>}
@@ -464,6 +503,16 @@ export default function Home() {
             </div>
             <div className="text-xs text-muted-foreground mt-1">Rule: 100 × (1 − (normalized ensemble spread + normalized inter-model deviation)/2).</div>
           </div>
+
+          {data?.results?.some((r: any) => r.status === "error") && (
+            <div className="flex flex-wrap gap-2">
+              {(data.results || []).filter((r: any) => r.status === "error").map((r: any) => (
+                <Badge key={r.product} variant="destructive" className="text-xs">
+                  {r.product}: {r.error?.slice(0, 80) || "failed"}
+                </Badge>
+              ))}
+            </div>
+          )}
 
           <div className="flex gap-1 border-b border-border">
             {(["fan", "spaghetti", "agreement", "table"] as const).map((t) => (
@@ -486,7 +535,7 @@ export default function Home() {
                       <>
                         <div key={r.dataProduct.id + "-name"} className="truncate">{r.dataProduct.id}</div>
                         {(stats?.leads || []).filter((_: any, i: number) => i % 6 === 0).map((h: number) => {
-                          const v = (r._data || {})[variable]?.[h] ?? null;
+                          const v = modelValueAt(r, variable, h);
                           const med = stats?.multiMedian?.[stats.leads.indexOf(h)];
                           const dev = (typeof v === "number" && typeof med === "number") ? Math.abs(v - med) : 0;
                           const t = Math.min(1, dev / varMeta.scale);
@@ -511,7 +560,7 @@ export default function Home() {
                         <tr key={h} className="border-t border-border">
                           <td className="p-1 font-mono">{h}h</td>
                           {results.map((r: any) => {
-                            const v = (r._data || {})[variable]?.[h] ?? null;
+                            const v = modelValueAt(r, variable, h);
                             return <td key={r.dataProduct.id} className="p-1 font-mono">{typeof v === "number" ? v.toFixed(2) : "—"}</td>;
                           })}
                         </tr>
@@ -530,10 +579,8 @@ export default function Home() {
                       <Legend />
                       {tab === "fan" && chartData.some((d: any) => d._p90High != null) && (
                         <>
-                          <Area type="monotone" dataKey="_p90High" stroke="none" fill="#4fd1c5" fillOpacity={0.08} />
-                          <Area type="monotone" dataKey="_p90Low" stroke="none" fill="#4fd1c5" fillOpacity={0.08} />
-                          <Area type="monotone" dataKey="_p50High" stroke="none" fill="#4fd1c5" fillOpacity={0.18} />
-                          <Area type="monotone" dataKey="_p50Low" stroke="none" fill="#4fd1c5" fillOpacity={0.18} />
+                          <Area type="monotone" dataKey={["_p90Low", "_p90High"] as any} stroke="none" fill="#4fd1c5" fillOpacity={0.08} name="90% band" />
+                          <Area type="monotone" dataKey={["_p50Low", "_p50High"] as any} stroke="none" fill="#4fd1c5" fillOpacity={0.18} name="50% band" />
                           <Line type="monotone" dataKey="_ensMedian" stroke="#4fd1c5" strokeWidth={2.5} dot={false} connectNulls name="Ensemble median" />
                         </>
                       )}
