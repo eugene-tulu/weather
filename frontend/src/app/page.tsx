@@ -71,9 +71,9 @@ export default function Home() {
   const [maxLead, setMaxLead] = useState(48);
   const [snapshot, setSnapshot] = useState("latest");
   const [runOptions, setRunOptions] = useState<string[]>(["latest"]);
+  const [latestInitTime, setLatestInitTime] = useState<string | null>(null);
   const [tab, setTab] = useState<"fan" | "spaghetti" | "agreement" | "table">("fan");
   const [data, setData] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showHowTo, setShowHowTo] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -82,18 +82,8 @@ export default function Home() {
   const modelLabel = (id: string) => MODELS.find((m) => m.id === id)?.label || id;
   function modelValueAt(r: any, v: string, idx: number) {
     if (isEnsemble(r)) {
-      const arr = (r._ensemble || []).map((m: any) => {
-        if (v === "wind_speed") {
-          const u = m.data?.wind_u_10m?.[idx]; const vv = m.data?.wind_v_10m?.[idx];
-          return (typeof u === "number" && typeof vv === "number") ? Math.sqrt(u * u + vv * vv) : null;
-        }
-        return m.data?.[v]?.[idx];
-      }).filter((x: any) => typeof x === "number");
-      return arr.length ? arr.reduce((a: number, b: number) => a + b, 0) / arr.length : null;
-    }
-    if (v === "wind_speed") {
-      const u = (r._data || {})["wind_u_10m"]?.[idx]; const vv = (r._data || {})["wind_v_10m"]?.[idx];
-      return (typeof u === "number" && typeof vv === "number") ? Math.sqrt(u * u + vv * vv) : null;
+      const arr = (r._ensemble || []).map((m: any) => m.data?.[v]?.[idx]).filter((x: any) => typeof x === "number");
+      return arr.length ? median(arr) : null;
     }
     return (r._data || {})[v]?.[idx] ?? null;
   }
@@ -122,7 +112,7 @@ export default function Home() {
       .then((r) => r.json())
       .then((d) => {
         const opts = (d.runs || []).map((x: any) => x.initTime);
-        if (opts.length) setRunOptions(opts);
+        if (opts.length) { setRunOptions(["latest", ...opts]); setLatestInitTime(opts[0]); }
       })
       .catch(() => {});
   }, [models]);
@@ -152,7 +142,7 @@ export default function Home() {
 
   async function fetchForecast(ctrl?: AbortController) {
     if (models.length === 0) { setError("Select at least one model."); return; }
-    setLoading(true); setError(null);
+    setError(null);
     try {
       const fetchVars = variable === "wind_speed" ? ["wind_u_10m", "wind_v_10m"] : [variable];
       const forecastModels = models.filter((m) => !m.includes("analysis"));
@@ -162,7 +152,7 @@ export default function Home() {
         const res = await fetch(`${API}/api/point`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ latitude: Number(lat), longitude: Number(lon), products: forecastModels, variables: fetchVars, maxLeadTimeHours: maxLead, initTime: snapshot === "latest" ? undefined : snapshot }),
+          body: JSON.stringify({ latitude: Number(lat), longitude: Number(lon), products: forecastModels, variables: fetchVars, maxLeadTimeHours: maxLead, initTime: snapshot === "latest" ? "latest" : snapshot }),
           signal: ctrl?.signal,
         });
         if (!res.ok) throw new Error(await res.text());
@@ -170,12 +160,13 @@ export default function Home() {
         allResults.push(...(json.results || []));
       }
       if (analysisModels.length) {
-        const now = new Date();
-        const start = new Date(now.getTime() - maxLead * 3600 * 1000);
+        const init = snapshot === "latest" ? (latestInitTime || new Date().toISOString()) : snapshot;
+        const initDate = new Date(init);
+        const endMs = Math.min(Date.now(), initDate.getTime() + maxLead * 3600 * 1000);
         const res = await fetch(`${API}/api/analysis`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ latitude: Number(lat), longitude: Number(lon), products: analysisModels, variables: fetchVars, startTime: start.toISOString(), endTime: now.toISOString() }),
+          body: JSON.stringify({ latitude: Number(lat), longitude: Number(lon), products: analysisModels, variables: fetchVars, startTime: initDate.toISOString(), endTime: new Date(endMs).toISOString() }),
           signal: ctrl?.signal,
         });
         if (!res.ok) throw new Error(await res.text());
@@ -198,34 +189,28 @@ export default function Home() {
           const v = r._data["wind_v_10m"] || [];
           r._data["wind_speed"] = u.map((val: number, i: number) => (typeof val === "number" && typeof v[i] === "number") ? Math.sqrt(val * val + v[i] * v[i]) : null);
         }
-        if (Array.isArray(r._ensemble)) {
-          r._ensemble.forEach((m: any) => {
-            const u = m.data?.wind_u_10m || [];
-            const v = m.data?.wind_v_10m || [];
-            m.data = m.data || {};
-            m.data.wind_speed = u.map((val: number, i: number) => (typeof val === "number" && typeof v[i] === "number") ? Math.sqrt(val * val + v[i] * v[i]) : null);
-          });
-        }
+
       });
       setData({ results: allResults });
     } catch (e: any) {
       if (e?.name === "AbortError") return;
       setError(e.message);
     }
-    finally { setLoading(false); }
+
   }
 
   useEffect(() => {
-    const dropped: string[] = [];
+    const dropped = models.filter((id) => {
+      const m = MODELS.find((x) => x.id === id);
+      return !( !m || m.type === "Analysis" || m.horizon >= maxLead );
+    }).map((id) => MODELS.find((x) => x.id === id)?.label || id);
     setModels((prev) => prev.filter((id) => {
       const m = MODELS.find((x) => x.id === id);
-      const avail = !m || m.type === "Analysis" || m.horizon >= maxLead;
-      if (!avail) dropped.push(m?.label || id);
-      return avail;
+      return !m || m.type === "Analysis" || m.horizon >= maxLead;
     }));
     if (dropped.length) setNotice(`${dropped.join(", ")} dropped: horizon shorter than ${maxLead}h.`);
     else setNotice(null);
-  }, [maxLead]);
+  }, [maxLead, models]);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -264,7 +249,7 @@ export default function Home() {
         return m.data?.[variable]?.[idx] ?? null;
       }).filter((v: any) => typeof v === "number");
       if (vals.length) {
-        row._ensMedian = vals.reduce((a: number, b: number) => a + b, 0) / vals.length;
+        row._ensMedian = median(vals);
         row._p50Low = percentile(vals, 0.25);
         row._p50High = percentile(vals, 0.75);
         row._p90Low = percentile(vals, 0.05);
@@ -513,16 +498,14 @@ export default function Home() {
             <div>
               <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">Snapshot</div>
               <select className="w-full border border-border rounded px-2 py-1 bg-background text-sm" value={snapshot} onChange={(e) => setSnapshot(e.target.value)}>
-                {runOptions.map((rt) => (
+                <option value="latest">Latest run</option>
+                {runOptions.filter((r) => r !== "latest").map((rt) => (
                   <option key={rt} value={rt}>{rt}</option>
                 ))}
               </select>
 
             </div>
 
-            <Button onClick={() => fetchForecast()} disabled={loading} className="w-full">
-              {loading ? "Fetching…" : "Forecast"}
-            </Button>
             {error && <div className="text-xs text-destructive">{error}</div>}
           </div>
         </aside>
@@ -640,7 +623,7 @@ export default function Home() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
             <Card><CardContent className="p-3 text-sm"><div className="text-xs text-muted-foreground">Biggest disagreement</div>{stats ? `${modelLabel(stats.bigA)} vs ${modelLabel(stats.bigB)} at ${stats.bigH}h — ${stats.bigVal.toFixed(2)} ${varMeta.unit}` : "—"}</CardContent></Card>
             <Card><CardContent className="p-3 text-sm"><div className="text-xs text-muted-foreground">Spread at 24h / 72h / 7d</div>{stats ? `${stats.spreadAt(24)} / ${stats.spreadAt(72)} / ${stats.spreadAt(168)} ${varMeta.unit}` : "—"}</CardContent></Card>
-            <Card><CardContent className="p-3 text-sm"><div className="text-xs text-muted-foreground">Run age</div>{stats ? (results[0]?._times?.[0] || "n/a") : "—"}</CardContent></Card>
+            <Card><CardContent className="p-3 text-sm"><div className="text-xs text-muted-foreground">Run age</div>{stats ? results.map((r: any) => r.forecasts?.[0]?.initTime || r.analysisTimes?.[0] || "n/a").join(", ") : "—"}</CardContent></Card>
           </div>
 
           <div className="flex flex-wrap gap-2">
