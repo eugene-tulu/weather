@@ -119,63 +119,18 @@ async def point(q: PointQuery):
             async with httpx.AsyncClient(timeout=60) as client:
                 r = await client.post(DYNAMICAL, json=payload)
             if r.status_code != 200:
-                return {"product": pid, "status": "error", "error": r.text}
+                return {"product": pid, "dataProduct": {"id": pid}, "status": "error", "error": r.text}
             data = r.json()
-            res = (data.get("results") or [{}])[0]
+            res = (data.get("results") or [{}])[0] or {}
+            if "dataProduct" not in res:
+                res["dataProduct"] = {"id": pid}
             res["status"] = "ok"
             db.execute("INSERT OR REPLACE INTO cache (key, payload, ts) VALUES (?, ?, ?)", [key, json.dumps(res), time.time()])
             return res
         except Exception as e:
-            return {"product": pid, "status": "error", "error": str(e)}
+            return {"product": pid, "dataProduct": {"id": pid}, "status": "error", "error": str(e)}
 
     results = await asyncio.gather(*[fetch_one(pid) for pid in q.products])
     return {"results": list(results)}
 
 
-@app.get("/api/product/{product_id}")
-async def product(product_id: str):
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.get(f"https://api.dynamical.org/v1/data-products/{product_id}")
-    if r.status_code != 200:
-        raise HTTPException(status_code=r.status_code, detail=r.text)
-    return r.json()
-
-
-@app.post("/api/point")
-async def point(q: PointQuery):
-    key = json.dumps(
-        {
-            "lat": q.latitude,
-            "lon": q.longitude,
-            "products": q.products,
-            "variables": q.variables,
-            "maxLead": q.maxLeadTimeHours,
-        },
-        sort_keys=True,
-    )
-    row = db.execute(
-        "SELECT payload, ts FROM cache WHERE key = ?", [key]
-    ).fetchone()
-    if row and (time.time() - row[1]) < 600:
-        return json.loads(row[0])
-
-    queries = [
-        {
-            "dataProductId": pid,
-            "location": {"latitude": q.latitude, "longitude": q.longitude},
-            "variables": q.variables,
-            "maxLeadTimeHours": q.maxLeadTimeHours,
-            **({"initTime": q.initTime} if q.initTime else {}),
-        }
-        for pid in q.products
-    ]
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(DYNAMICAL, json={"queries": queries})
-    if r.status_code != 200:
-        raise HTTPException(status_code=r.status_code, detail=r.text)
-    payload = r.json()
-    db.execute(
-        "INSERT OR REPLACE INTO cache (key, payload, ts) VALUES (?, ?, ?)",
-        [key, json.dumps(payload), time.time()],
-    )
-    return payload

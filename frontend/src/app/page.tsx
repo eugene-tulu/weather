@@ -76,8 +76,10 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [productMeta, setProductMeta] = useState<Record<string, any>>({});
   const [showHowTo, setShowHowTo] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const varMeta = VARS.find((v) => v.id === variable) || VARS[0];
+  const modelLabel = (id: string) => MODELS.find((m) => m.id === id)?.label || id;
   function modelValueAt(r: any, v: string, idx: number) {
     if (isEnsemble(r)) {
       const arr = (r._ensemble || []).map((m: any) => {
@@ -153,14 +155,34 @@ export default function Home() {
     setLoading(true); setError(null);
     try {
       const fetchVars = variable === "wind_speed" ? ["wind_u_10m", "wind_v_10m"] : [variable];
-      const res = await fetch(`${API}/api/point`, { signal: ctrl?.signal,
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ latitude: Number(lat), longitude: Number(lon), products: models, variables: fetchVars, maxLeadTimeHours: maxLead, initTime: snapshot === "latest" ? "latest" : snapshot }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const json = await res.json();
-      (json.results || []).forEach((r: any) => {
+      const forecastModels = models.filter((m) => !m.includes("analysis"));
+      const analysisModels = models.filter((m) => m.includes("analysis"));
+      const allResults: any[] = [];
+      if (forecastModels.length) {
+        const res = await fetch(`${API}/api/point`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ latitude: Number(lat), longitude: Number(lon), products: forecastModels, variables: fetchVars, maxLeadTimeHours: maxLead, initTime: snapshot === "latest" ? undefined : snapshot }),
+          signal: ctrl?.signal,
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const json = await res.json();
+        allResults.push(...(json.results || []));
+      }
+      if (analysisModels.length) {
+        const now = new Date();
+        const start = new Date(now.getTime() - maxLead * 3600 * 1000);
+        const res = await fetch(`${API}/api/analysis`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ latitude: Number(lat), longitude: Number(lon), products: analysisModels, variables: fetchVars, startTime: start.toISOString(), endTime: now.toISOString() }),
+          signal: ctrl?.signal,
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const json = await res.json();
+        allResults.push(...(json.results || []));
+      }
+      allResults.forEach((r: any) => {
         if (r.status && r.status !== "ok") return;
         if (r.forecasts?.[0]) {
           r._times = r.forecasts[0].validTimes || [];
@@ -171,22 +193,39 @@ export default function Home() {
           r._data = r.data || {};
           r._ensemble = null;
         }
-        // derived wind speed
         if (variable === "wind_speed") {
           const u = r._data["wind_u_10m"] || [];
           const v = r._data["wind_v_10m"] || [];
           r._data["wind_speed"] = u.map((val: number, i: number) => (typeof val === "number" && typeof v[i] === "number") ? Math.sqrt(val * val + v[i] * v[i]) : null);
         }
+        if (Array.isArray(r._ensemble)) {
+          r._ensemble.forEach((m: any) => {
+            const u = m.data?.wind_u_10m || [];
+            const v = m.data?.wind_v_10m || [];
+            m.data = m.data || {};
+            m.data.wind_speed = u.map((val: number, i: number) => (typeof val === "number" && typeof v[i] === "number") ? Math.sqrt(val * val + v[i] * v[i]) : null);
+          });
+        }
       });
-      setData(json);
-      const meta: Record<string, any> = {};
-      for (const pid of models) {
-        try { const r = await fetch(`${API}/api/product/${pid}`); if (r.ok) meta[pid] = await r.json(); } catch {}
-      }
-      setProductMeta(meta);
-    } catch (e: any) { setError(e.message); }
+      setData({ results: allResults });
+    } catch (e: any) {
+      if (e?.name === "AbortError") return;
+      setError(e.message);
+    }
     finally { setLoading(false); }
   }
+
+  useEffect(() => {
+    const dropped: string[] = [];
+    setModels((prev) => prev.filter((id) => {
+      const m = MODELS.find((x) => x.id === id);
+      const avail = !m || m.type === "Analysis" || m.horizon >= maxLead;
+      if (!avail) dropped.push(m?.label || id);
+      return avail;
+    }));
+    if (dropped.length) setNotice(`${dropped.join(", ")} dropped: horizon shorter than ${maxLead}h.`);
+    else setNotice(null);
+  }, [maxLead]);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -502,13 +541,14 @@ export default function Home() {
               <span className="font-mono text-sm">{stats ? stats.score + "/100" : "—"}</span>
             </div>
             <div className="text-xs text-muted-foreground mt-1">Rule: 100 × (1 − (normalized ensemble spread + normalized inter-model deviation)/2).</div>
+            {notice && <div className="text-xs text-amber-400 mt-1">{notice}</div>}
           </div>
 
           {data?.results?.some((r: any) => r.status === "error") && (
             <div className="flex flex-wrap gap-2">
               {(data.results || []).filter((r: any) => r.status === "error").map((r: any) => (
                 <Badge key={r.product} variant="destructive" className="text-xs">
-                  {r.product}: {r.error?.slice(0, 80) || "failed"}
+                  {modelLabel(r.dataProduct?.id || r.product)}: {r.error?.slice(0, 80) || "failed"}
                 </Badge>
               ))}
             </div>
@@ -533,7 +573,7 @@ export default function Home() {
                     ))}
                     {results.filter((r: any) => (r._times || []).length).map((r: any) => (
                       <>
-                        <div key={r.dataProduct.id + "-name"} className="truncate">{r.dataProduct.id}</div>
+                        <div key={r.dataProduct.id + "-name"} className="truncate">{modelLabel(r.dataProduct.id)}</div>
                         {(stats?.leads || []).filter((_: any, i: number) => i % 6 === 0).map((h: number) => {
                           const v = modelValueAt(r, variable, h);
                           const med = stats?.multiMedian?.[stats.leads.indexOf(h)];
@@ -585,7 +625,7 @@ export default function Home() {
                         </>
                       )}
                       {results.map((r: any, i: number) => (
-                        <Line key={r.dataProduct.id} type="monotone" dataKey={r.dataProduct.id} stroke={MODELS.find((m) => m.id === r.dataProduct.id)?.color || COLORS[i]} strokeWidth={2} dot={false} connectNulls strokeDasharray={MODELS.find((m) => m.id === r.dataProduct.id)?.dash.join(" ")} />
+                        <Line key={r.dataProduct.id} type="monotone" dataKey={r.dataProduct.id} stroke={MODELS.find((m) => m.id === r.dataProduct.id)?.color || COLORS[i]} strokeWidth={2} dot={false} connectNulls strokeDasharray={MODELS.find((m) => m.id === r.dataProduct.id)?.dash.join(" ")} name={modelLabel(r.dataProduct.id)} />
                       ))}
                       {tab === "spaghetti" && results.filter(isEnsemble).map((r: any) =>
                         (r._ensemble || []).map((_: any, mi: number) => (
@@ -600,7 +640,7 @@ export default function Home() {
           </Card>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-            <Card><CardContent className="p-3 text-sm"><div className="text-xs text-muted-foreground">Biggest disagreement</div>{stats ? `${stats.bigA} vs ${stats.bigB} at ${stats.bigH}h — ${stats.bigVal.toFixed(2)} ${varMeta.unit}` : "—"}</CardContent></Card>
+            <Card><CardContent className="p-3 text-sm"><div className="text-xs text-muted-foreground">Biggest disagreement</div>{stats ? `${modelLabel(stats.bigA)} vs ${modelLabel(stats.bigB)} at ${stats.bigH}h — ${stats.bigVal.toFixed(2)} ${varMeta.unit}` : "—"}</CardContent></Card>
             <Card><CardContent className="p-3 text-sm"><div className="text-xs text-muted-foreground">Spread at 24h / 72h / 7d</div>{stats ? `${stats.spreadAt(24)} / ${stats.spreadAt(72)} / ${stats.spreadAt(168)} ${varMeta.unit}` : "—"}</CardContent></Card>
             <Card><CardContent className="p-3 text-sm"><div className="text-xs text-muted-foreground">Run age</div>{stats ? (results[0]?._times?.[0] || "n/a") : "—"}</CardContent></Card>
           </div>
