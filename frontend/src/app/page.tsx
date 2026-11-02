@@ -76,6 +76,7 @@ export default function Home() {
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [showHowTo, setShowHowTo] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const varMeta = VARS.find((v) => v.id === variable) || VARS[0];
@@ -142,7 +143,7 @@ export default function Home() {
 
   async function fetchForecast(ctrl?: AbortController) {
     if (models.length === 0) { setError("Select at least one model."); return; }
-    setError(null);
+    setLoading(true); setError(null);
     try {
       const fetchVars = variable === "wind_speed" ? ["wind_u_10m", "wind_v_10m"] : [variable];
       const forecastModels = models.filter((m) => !m.includes("analysis"));
@@ -204,6 +205,7 @@ export default function Home() {
       if (e?.name === "AbortError") return;
       setError(e.message);
     }
+    finally { setLoading(false); }
 
   }
 
@@ -216,8 +218,6 @@ export default function Home() {
     if (dropped.length) {
       setModels((prev) => prev.filter(keep));
       setNotice(`${dropped.join(", ")} dropped: horizon shorter than ${maxLead}h.`);
-    } else {
-      setNotice(null);
     }
   }, [maxLead, models]);
 
@@ -311,6 +311,8 @@ export default function Home() {
     const tsSet = new Set<string>();
     results.forEach((r: any) => (r._times || []).forEach((t: string) => tsSet.add(t)));
     const leads = [...tsSet].sort();
+    const initTime = results[0]?.forecasts?.[0]?.initTime || results[0]?.analysisTimes?.[0] || leads[0];
+    const leadHours = leads.map((t) => Math.round((new Date(t).getTime() - new Date(initTime).getTime()) / 3.6e6));
     const modelValue = (r: any, idx: number) => {
       if (isEnsemble(r)) {
         const arr = (r._ensemble || []).map((m: any) => m.data?.[variable]?.[idx]).filter((x: any) => typeof x === "number");
@@ -352,17 +354,22 @@ export default function Home() {
     const multiMedian = multiVals.map((vals) => (vals.length ? median(vals) : null));
     const interdev = multiVals.map((vals) => (vals.length > 1 ? std(vals) : 0));
     const thr = varMeta.scale * 0.3;
-    let agreeUntil = leads.length - 1;
+    let agreeUntil = leadHours[leadHours.length - 1] || 0;
     for (let i = 0; i < leads.length; i++) {
-      if ((spread[i] || 0) > thr || (interdev[i] || 0) > thr) { agreeUntil = i; break; }
+      if ((spread[i] || 0) > thr || (interdev[i] || 0) > thr) { agreeUntil = leadHours[i]; break; }
     }
     const maxSplit = Math.max(0, ...leads.map((_, i) => {
       const vals = multiVals[i]; if (!vals.length) return 0;
       return Math.max(...vals) - Math.min(...vals);
     }));
-    const idx24 = Math.min(24, leads.length - 1);
-    const idx72 = Math.min(72, leads.length - 1);
-    const idx7d = Math.min(168, leads.length - 1);
+    function nearestIndex(target: number) {
+      let best = 0, bestDiff = Infinity;
+      leadHours.forEach((h, i) => { const d = Math.abs(h - target); if (d < bestDiff) { bestDiff = d; best = i; } });
+      return best;
+    }
+    const idx24 = nearestIndex(24);
+    const idx72 = nearestIndex(72);
+    const idx7d = nearestIndex(168);
     const avgSpread = [spread[idx24], spread[idx72], spread[idx7d]].filter((v: any) => typeof v === "number");
     const avgInter = [interdev[idx24], interdev[idx72], interdev[idx7d]].filter((v: any) => typeof v === "number");
     const ns = Math.min(1, (avgSpread.reduce((a, b) => a + b, 0) / (avgSpread.length || 1)) / varMeta.scale);
@@ -380,16 +387,13 @@ export default function Home() {
       if (pts.length < 2) return;
       pts.sort((a: any, b: any) => a.v - b.v);
       const diff = pts[pts.length - 1].v - pts[0].v;
-      if (diff > bigVal) { bigVal = diff; bigIdx = i; bigA = pts[0].id; bigB = pts[pts.length - 1].id; }
+      if (diff > bigVal) { bigVal = diff; bigIdx = leadHours[i]; bigA = pts[0].id; bigB = pts[pts.length - 1].id; }
     });
     const spreadAt = (target: number) => {
-      const i = leads.findIndex((t) => {
-        const h = Number(t.match(/T(\d{2}):/)?.[1] || 0);
-        return false;
-      });
-      return (spread[Math.min(target, leads.length - 1)] || 0).toFixed(2);
+      const i = nearestIndex(target);
+      return (spread[i] || 0).toFixed(2);
     };
-    return { leads, spread, multiMedian, interdev, score, label, thr, agreeUntil, maxSplit, bigH: bigIdx, bigVal, bigA, bigB, spreadAt, runAge: results.map((r: any) => r.forecasts?.[0]?.initTime || r.analysisTimes?.[0] || "n/a").join(", "), ensMedian };
+    return { leads, leadHours, spread, multiMedian, interdev, score, label, thr, agreeUntil, maxSplit, bigH: bigIdx, bigVal, bigA, bigB, spreadAt, runAge: results.map((r: any) => `${modelLabel(r.dataProduct.id)}: ${r.forecasts?.[0]?.initTime || r.analysisTimes?.[0] || "n/a"}`).join(", "), ensMedian };
   }
 
   const stats = data ? computeStats() : null;
@@ -532,7 +536,8 @@ export default function Home() {
         {/* Main panel */}
         <main className="flex-1 p-4 space-y-4">
           <div>
-            <div className="text-lg font-semibold">{stats ? `Models agree within ${(varMeta.scale * 0.3).toFixed(1)}${varMeta.unit} through ${stats.agreeUntil < 24 ? "the next " + stats.agreeUntil + "h" : Math.round(stats.agreeUntil / 24) + "d"}, then split by up to ${stats.maxSplit.toFixed(1)}${varMeta.unit}.` : "Waiting on the models…"}</div>
+            {loading && <div className="text-sm text-muted-foreground mb-2">Fetching…</div>}
+          <div className="text-lg font-semibold">{stats ? `Models agree within ${(varMeta.scale * 0.3).toFixed(1)}${varMeta.unit} through ${stats.agreeUntil < 24 ? "the next " + stats.agreeUntil + "h" : Math.round(stats.agreeUntil / 24) + "d"}, then split by up to ${stats.maxSplit.toFixed(1)}${varMeta.unit}.` : "Waiting on the models…"}</div>
             <div className="flex items-center gap-3 mt-2">
               <span className="text-sm">{stats ? stats.label + " confidence" : "—"}</span>
               <div className="flex-1 h-2 bg-muted rounded overflow-hidden">
