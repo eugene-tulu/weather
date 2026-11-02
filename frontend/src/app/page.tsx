@@ -1,5 +1,4 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-/* eslint-disable react/no-unescaped-entities */
 /* eslint-disable react-hooks/set-state-in-effect */
 "use client";
 
@@ -444,7 +443,7 @@ export default function Home() {
       <header className="flex items-center justify-between border-b border-border px-4 py-3 bg-card">
         <div>
           <div className="font-bold tracking-tight">Disagreement</div>
-          <div className="text-xs text-muted-foreground">Weather isn't a number. It's a disagreement.</div>
+          <div className="text-xs text-muted-foreground">Weather isn&apos;t a number. It&apos;s a disagreement.</div>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" className="md:hidden" onClick={() => setRailOpen(true)}>Controls</Button>
@@ -670,8 +669,8 @@ export default function Home() {
             <CardHeader><CardTitle>How to read this</CardTitle></CardHeader>
             <CardContent className="space-y-3 text-sm">
               <div><strong>What a fan chart is</strong><p className="text-muted-foreground">An ensemble forecast shown as a median line with shaded 50% and 90% bands. Wider fan = less self-agreement.</p></div>
-              <div><strong>What "agreement" means</strong><p className="text-muted-foreground">Two measures: ensemble spread and inter-model deviation. Both must be small for high confidence.</p></div>
-              <div><strong>Why a narrow band isn't the same as being right</strong><p className="text-muted-foreground">A tight ensemble can share a bias. Narrow means precise, not correct. Compare against the analysis line.</p></div>
+              <div><strong>What &quot;agreement&quot; means</strong><p className="text-muted-foreground">Two measures: ensemble spread and inter-model deviation. Both must be small for high confidence.</p></div>
+              <div><strong>Why a narrow band isn&apos;t the same as being right</strong><p className="text-muted-foreground">A tight ensemble can share a bias. Narrow means precise, not correct. Compare against the analysis line.</p></div>
               <Button size="sm" onClick={() => setShowHowTo(false)}>Close</Button>
             </CardContent>
           </Card>
