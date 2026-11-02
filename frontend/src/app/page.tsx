@@ -1,6 +1,6 @@
-/* eslint-disable react-hooks/set-state-in-effect */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react/no-unescaped-entities */
+/* eslint-disable react-hooks/set-state-in-effect */
 "use client";
 
 import { useEffect, useRef, useState } from "react";
@@ -189,6 +189,14 @@ export default function Home() {
           const v = r._data["wind_v_10m"] || [];
           r._data["wind_speed"] = u.map((val: number, i: number) => (typeof val === "number" && typeof v[i] === "number") ? Math.sqrt(val * val + v[i] * v[i]) : null);
         }
+        if (variable === "wind_speed" && Array.isArray(r._ensemble)) {
+          r._ensemble.forEach((m: any) => {
+            const u = m.data?.wind_u_10m || [];
+            const v = m.data?.wind_v_10m || [];
+            m.data = m.data || {};
+            m.data.wind_speed = u.map((val: number, i: number) => (typeof val === "number" && typeof v[i] === "number") ? Math.sqrt(val * val + v[i] * v[i]) : null);
+          });
+        }
 
       });
       setData({ results: allResults });
@@ -200,16 +208,17 @@ export default function Home() {
   }
 
   useEffect(() => {
-    const dropped = models.filter((id) => {
-      const m = MODELS.find((x) => x.id === id);
-      return !( !m || m.type === "Analysis" || m.horizon >= maxLead );
-    }).map((id) => MODELS.find((x) => x.id === id)?.label || id);
-    setModels((prev) => prev.filter((id) => {
+    const keep = (id: string) => {
       const m = MODELS.find((x) => x.id === id);
       return !m || m.type === "Analysis" || m.horizon >= maxLead;
-    }));
-    if (dropped.length) setNotice(`${dropped.join(", ")} dropped: horizon shorter than ${maxLead}h.`);
-    else setNotice(null);
+    };
+    const dropped = models.filter((id) => !keep(id)).map((id) => MODELS.find((x) => x.id === id)?.label || id);
+    if (dropped.length) {
+      setModels((prev) => prev.filter(keep));
+      setNotice(`${dropped.join(", ")} dropped: horizon shorter than ${maxLead}h.`);
+    } else {
+      setNotice(null);
+    }
   }, [maxLead, models]);
 
   useEffect(() => {
@@ -220,7 +229,7 @@ export default function Home() {
       fetchForecast(ctrl);
     }, 400);
     return () => { clearTimeout(t); ctrl.abort(); };
-  }, [lat, lon, variable, models, maxLead, snapshot]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [lat, lon, variable, models, maxLead, snapshot, latestInitTime]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function useMyLocation() {
     if (!navigator.geolocation) return;
