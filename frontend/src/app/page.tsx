@@ -308,23 +308,35 @@ export default function Home() {
   // computations for confidence/headline/cards
   function computeStats() {
     if (!results.length) return null;
-    const n = maxLead + 1;
-    const leads = Array.from({ length: n }, (_, i) => i);
-    const modelPoints = leads.map((i) =>
-      results.filter((r: any) => !isEnsemble(r)).map((r: any) => {
-        const v = (r._data || {})[variable]?.[i];
+    const tsSet = new Set<string>();
+    results.forEach((r: any) => (r._times || []).forEach((t: string) => tsSet.add(t)));
+    const leads = [...tsSet].sort();
+    const modelValue = (r: any, idx: number) => {
+      if (isEnsemble(r)) {
+        const arr = (r._ensemble || []).map((m: any) => m.data?.[variable]?.[idx]).filter((x: any) => typeof x === "number");
+        return arr.length ? median(arr) : null;
+      }
+      return (r._data || {})[variable]?.[idx] ?? null;
+    };
+    const modelPoints = leads.map((t) =>
+      results.map((r: any) => {
+        const idx = (r._times || []).indexOf(t);
+        if (idx < 0) return null;
+        const v = modelValue(r, idx);
         return typeof v === "number" ? v : null;
       }).filter((v: any) => v !== null)
     );
     const ensModels = results.filter(isEnsemble);
     const allMembers: number[][] = [];
     ensModels.forEach((r: any) => (r._ensemble || []).forEach((m: any) => {
-      const arr = leads.map((i) => {
+      const arr = leads.map((t) => {
+        const idx = (r._times || []).indexOf(t);
+        if (idx < 0) return null;
         if (variable === "wind_speed") {
-          const u = m.data?.wind_u_10m?.[i]; const v = m.data?.wind_v_10m?.[i];
+          const u = m.data?.wind_u_10m?.[idx]; const v = m.data?.wind_v_10m?.[idx];
           return (typeof u === "number" && typeof v === "number") ? Math.sqrt(u * u + v * v) : null;
         }
-        return m.data?.[variable]?.[i] ?? null;
+        return m.data?.[variable]?.[idx] ?? null;
       });
       allMembers.push(arr);
     }));
@@ -348,38 +360,36 @@ export default function Home() {
       const vals = multiVals[i]; if (!vals.length) return 0;
       return Math.max(...vals) - Math.min(...vals);
     }));
-    const avgSpread = [spread[Math.min(24, leads.length - 1)], spread[Math.min(72, leads.length - 1)], spread[Math.min(168, leads.length - 1)]].filter((v: any) => typeof v === "number");
-    const avgInter = [interdev[Math.min(24, leads.length - 1)], interdev[Math.min(72, leads.length - 1)], interdev[Math.min(168, leads.length - 1)]].filter((v: any) => typeof v === "number");
+    const idx24 = Math.min(24, leads.length - 1);
+    const idx72 = Math.min(72, leads.length - 1);
+    const idx7d = Math.min(168, leads.length - 1);
+    const avgSpread = [spread[idx24], spread[idx72], spread[idx7d]].filter((v: any) => typeof v === "number");
+    const avgInter = [interdev[idx24], interdev[idx72], interdev[idx7d]].filter((v: any) => typeof v === "number");
     const ns = Math.min(1, (avgSpread.reduce((a, b) => a + b, 0) / (avgSpread.length || 1)) / varMeta.scale);
     const ni = Math.min(1, (avgInter.reduce((a, b) => a + b, 0) / (avgInter.length || 1)) / varMeta.scale);
     const score = Math.round(100 * (1 - (ns + ni) / 2));
     const label = score >= 70 ? "High" : score >= 40 ? "Medium" : "Low";
-    let bigH = 0, bigVal = 0, bigA = "", bigB = "";
-    leads.forEach((h) => {
+    let bigIdx = 0, bigVal = 0, bigA = "", bigB = "";
+    leads.forEach((t, i) => {
       const pts = results.map((r: any) => {
-        const idx = h;
-        let v: any = null;
-        if (isEnsemble(r)) {
-          const arr = (r._ensemble || []).map((m: any) => {
-            if (variable === "wind_speed") {
-              const u = m.data?.wind_u_10m?.[idx]; const vv = m.data?.wind_v_10m?.[idx];
-              return (typeof u === "number" && typeof vv === "number") ? Math.sqrt(u * u + vv * vv) : null;
-            }
-            return m.data?.[variable]?.[idx];
-          }).filter((x: any) => typeof x === "number");
-          v = arr.length ? arr.reduce((a: number, b: number) => a + b, 0) / arr.length : null;
-        } else {
-          v = (r._data || {})[variable]?.[idx];
-        }
-        return { id: r.dataProduct.id, v };
-      }).filter((x: any) => typeof x.v === "number");
+        const idx = (r._times || []).indexOf(t);
+        if (idx < 0) return null;
+        const v = modelValue(r, idx);
+        return typeof v === "number" ? { id: r.dataProduct.id, v } : null;
+      }).filter((x: any) => x !== null);
       if (pts.length < 2) return;
       pts.sort((a: any, b: any) => a.v - b.v);
       const diff = pts[pts.length - 1].v - pts[0].v;
-      if (diff > bigVal) { bigVal = diff; bigH = h; bigA = pts[0].id; bigB = pts[pts.length - 1].id; }
+      if (diff > bigVal) { bigVal = diff; bigIdx = i; bigA = pts[0].id; bigB = pts[pts.length - 1].id; }
     });
-    const spreadAt = (h: number) => (spread[Math.min(h, leads.length - 1)] || 0).toFixed(2);
-    return { leads, spread, multiMedian, interdev, score, label, thr, agreeUntil, maxSplit, bigH, bigVal, bigA, bigB, spreadAt, runAge: results[0]?._times?.[0] || "n/a", ensMedian };
+    const spreadAt = (target: number) => {
+      const i = leads.findIndex((t) => {
+        const h = Number(t.match(/T(\d{2}):/)?.[1] || 0);
+        return false;
+      });
+      return (spread[Math.min(target, leads.length - 1)] || 0).toFixed(2);
+    };
+    return { leads, spread, multiMedian, interdev, score, label, thr, agreeUntil, maxSplit, bigH: bigIdx, bigVal, bigA, bigB, spreadAt, runAge: results.map((r: any) => r.forecasts?.[0]?.initTime || r.analysisTimes?.[0] || "n/a").join(", "), ensMedian };
   }
 
   const stats = data ? computeStats() : null;
@@ -558,19 +568,20 @@ export default function Home() {
                 <div className="overflow-auto">
                   <div className="grid text-xs" style={{ gridTemplateColumns: `120px repeat(${Math.ceil((stats?.leads.length || 0) / 6)}, 1fr)` }}>
                     <div />
-                    {(stats?.leads || []).filter((_: any, i: number) => i % 6 === 0).map((h: number) => (
-                      <div key={h} className="text-center text-muted-foreground font-mono">{h}h</div>
+                    {(stats?.leads || []).filter((_: any, i: number) => i % 6 === 0).map((t: string) => (
+                      <div key={t} className="text-center text-muted-foreground font-mono">{t.slice(11,16)}</div>
                     ))}
                     {results.filter((r: any) => (r._times || []).length).map((r: any) => (
                       <>
                         <div key={r.dataProduct.id + "-name"} className="truncate">{modelLabel(r.dataProduct.id)}</div>
-                        {(stats?.leads || []).filter((_: any, i: number) => i % 6 === 0).map((h: number) => {
-                          const v = modelValueAt(r, variable, h);
-                          const med = stats?.multiMedian?.[stats.leads.indexOf(h)];
+                        {(stats?.leads || []).filter((_: any, i: number) => i % 6 === 0).map((t: string) => {
+                          const idx = (r._times || []).indexOf(t);
+                          const v = idx >= 0 ? modelValueAt(r, variable, idx) : null;
+                          const med = stats?.multiMedian?.[stats.leads.indexOf(t)];
                           const dev = (typeof v === "number" && typeof med === "number") ? Math.abs(v - med) : 0;
-                          const t = Math.min(1, dev / varMeta.scale);
-                          const light = 30 + t * 40;
-                          return <div key={r.dataProduct.id + "-" + h} style={{ background: `hsl(${Math.round(30 + (1 - t) * 30)},70%,${light}%)`, height: 18, borderRadius: 2 }} title={`${r.dataProduct.id} ${h}h: ${typeof v === "number" ? v.toFixed(2) : "—"}`} />;
+                          const tt = Math.min(1, dev / varMeta.scale);
+                          const light = 30 + tt * 40;
+                          return <div key={r.dataProduct.id + "-" + t} style={{ background: `hsl(${Math.round(30 + (1 - tt) * 30)},70%,${light}%)`, height: 18, borderRadius: 2 }} title={`${modelLabel(r.dataProduct.id)} ${t.slice(11,16)}: ${typeof v === "number" ? v.toFixed(2) : "—"}`} />;
                         })}
                       </>
                     ))}
@@ -586,11 +597,12 @@ export default function Home() {
                       </tr>
                     </thead>
                     <tbody>
-                      {(stats?.leads || []).map((h: number) => (
-                        <tr key={h} className="border-t border-border">
-                          <td className="p-1 font-mono">{h}h</td>
+                      {(stats?.leads || []).map((t: string) => (
+                        <tr key={t} className="border-t border-border">
+                          <td className="p-1 font-mono">{t.slice(11,16)}</td>
                           {results.map((r: any) => {
-                            const v = modelValueAt(r, variable, h);
+                            const idx = (r._times || []).indexOf(t);
+                            const v = idx >= 0 ? modelValueAt(r, variable, idx) : null;
                             return <td key={r.dataProduct.id} className="p-1 font-mono">{typeof v === "number" ? v.toFixed(2) : "—"}</td>;
                           })}
                         </tr>
