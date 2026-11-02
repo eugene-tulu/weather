@@ -76,6 +76,7 @@ export default function Home() {
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [showHowTo, setShowHowTo] = useState(false);
+  const [railOpen, setRailOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -446,6 +447,7 @@ export default function Home() {
           <div className="text-xs text-muted-foreground">Weather isn't a number. It's a disagreement.</div>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" className="md:hidden" onClick={() => setRailOpen(true)}>Controls</Button>
           <Button variant="ghost" size="sm" onClick={() => setShowHowTo(true)}>How to read this</Button>
           <Button variant="ghost" size="sm" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
             {theme === "dark" ? "Light" : "Dark"}
@@ -455,7 +457,10 @@ export default function Home() {
 
       <div className="flex">
         {/* Left rail */}
-        <aside className="w-72 shrink-0 border-r border-border bg-card p-4">
+        <aside className={`${railOpen ? "fixed inset-x-0 bottom-0 z-40 max-h-[70vh] overflow-auto" : "hidden"} md:static md:block w-72 shrink-0 border-r border-border bg-card p-4`}>
+          <div className="md:hidden flex justify-end mb-2">
+            <Button variant="ghost" size="sm" onClick={() => setRailOpen(false)}>Close</Button>
+          </div>
           <div className="space-y-4">
             <div>
               <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">Location</div>
