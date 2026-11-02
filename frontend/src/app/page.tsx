@@ -164,6 +164,12 @@ export default function Home() {
   }, [maxLead, models]);
 
   useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 3000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  useEffect(() => {
     const ctrl = new AbortController();
     abortRef.current?.abort();
     abortRef.current = ctrl;
@@ -307,8 +313,11 @@ export default function Home() {
     const inRangeTargets = [24, 72, 168].filter((t) => t <= (leadHours[leadHours.length - 1] || 0));
     const avgSpread = inRangeTargets.map((t) => spread[nearestIndex(leadHours, t)]).filter((v: any) => typeof v === "number");
     const avgInter = inRangeTargets.map((t) => interdev[nearestIndex(leadHours, t)]).filter((v: any) => typeof v === "number");
-    const allVals = multiVals.flat().filter((v: any) => typeof v === "number");
-    const observedRange = allVals.length ? Math.max(...allVals) - Math.min(...allVals) : 1;
+    const perTsRanges = leads.map((_, i) => {
+      const vals = multiVals[i].filter((v: any) => typeof v === "number");
+      return vals.length ? Math.max(...vals) - Math.min(...vals) : 0;
+    }).filter((v) => v > 0);
+    const observedRange = perTsRanges.length ? median(perTsRanges) : 1;
     const { score, label } = confidenceScore(
       avgSpread.reduce((a, b) => a + b, 0) / (avgSpread.length || 1),
       avgInter.reduce((a, b) => a + b, 0) / (avgInter.length || 1),
@@ -396,7 +405,8 @@ export default function Home() {
 
       <div className="flex">
         {/* Left rail */}
-        <aside className={`${railOpen ? "fixed inset-x-0 bottom-0 z-40 max-h-[70vh] overflow-auto" : "hidden"} md:static md:block w-72 shrink-0 border-r border-border bg-card p-4`}>
+        {railOpen && <div className="fixed inset-0 z-30 bg-black/50 md:hidden" onClick={() => setRailOpen(false)} />}
+        <aside className={`${railOpen ? "fixed inset-x-0 bottom-0 z-40 max-h-[70vh] overflow-auto w-full" : "hidden"} md:static md:block md:w-72 shrink-0 border-r border-border bg-card p-4`}>
           <div className="md:hidden flex justify-end mb-2">
             <Button variant="ghost" size="sm" onClick={() => setRailOpen(false)}>Close</Button>
           </div>
@@ -488,7 +498,7 @@ export default function Home() {
               </div>
               <span className="font-mono text-sm">{stats ? stats.score + "/100" : "—"}</span>
             </div>
-            <div className="text-xs text-muted-foreground mt-1">Rule: 100 × (1 − (normalized ensemble spread + normalized inter-model deviation)/2).</div>
+            <div className="text-xs text-muted-foreground mt-1">Rule: 100 × (1 − (normalized ensemble spread + normalized inter-model deviation)/2), normalized by median per-timestamp range.</div>
             {notice && <div className="text-xs text-amber-400 mt-1">{notice}</div>}
           </div>
 
