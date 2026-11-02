@@ -14,50 +14,15 @@ import {
   ChartTooltipContent,
 } from "@/components/ui/chart";
 import { Line, LineChart, Area, XAxis, YAxis, CartesianGrid, Legend } from "recharts";
+import { MODELS, VARS, modelLabel } from "@/lib/models";
+import { median, percentile, std, nearestIndex, confidenceScore } from "@/lib/stats";
+import { normalizeResult } from "@/lib/normalize";
 
 const API = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
 
-const MODELS = [
-  { id: "noaa-gfs-forecast", label: "NOAA GFS", type: "Deterministic", horizon: 384, color: "#60a5fa", dash: [], desc: "Global, 0.25°, hourly updates." },
-  { id: "noaa-hrrr-forecast-48-hour", label: "NOAA HRRR", type: "Deterministic", horizon: 48, color: "#34d399", dash: [], desc: "3km convection-allowing, US only." },
-  { id: "ecmwf-aifs-single-forecast", label: "ECMWF AIFS", type: "Deterministic", horizon: 360, color: "#a78bfa", dash: [6, 4], desc: "ECMWF machine-learning model." },
-  { id: "dwd-icon-eu-forecast-5-day", label: "DWD ICON-EU", type: "Deterministic", horizon: 120, color: "#fbbf24", dash: [2, 4], desc: "High-res Europe." },
-  { id: "noaa-gefs-forecast-35-day", label: "NOAA GEFS", type: "Ensemble", horizon: 840, color: "#f472b6", dash: [], desc: "31 members, 35-day horizon.", members: 31 },
-  { id: "ecmwf-ifs-ens-forecast-15-day-0-25-degree", label: "ECMWF IFS ENS", type: "Ensemble", horizon: 360, color: "#22d3ee", dash: [], desc: "50 members, 15-day horizon.", members: 50 },
-  { id: "noaa-gfs-analysis", label: "NOAA GFS analysis", type: "Analysis", horizon: 0, color: "#94a3b8", dash: [1, 3], desc: "What actually happened (GFS)." },
-  { id: "noaa-hrrr-analysis", label: "NOAA HRRR analysis", type: "Analysis", horizon: 0, color: "#cbd5e1", dash: [1, 3], desc: "What actually happened (HRRR)." },
-];
 
-const VARS = [
-  { id: "temperature_2m", label: "Temperature", unit: "°C", scale: 10 },
-  { id: "relative_humidity_2m", label: "Humidity", unit: "%", scale: 20 },
-  { id: "precipitation_surface", label: "Precipitation", unit: "mm", scale: 5 },
-  { id: "total_cloud_cover_atmosphere", label: "Cloud cover", unit: "%", scale: 30 },
-  { id: "downward_short_wave_radiation_flux_surface", label: "Solar radiation", unit: "W/m²", scale: 200 },
-  { id: "pressure_reduced_to_mean_sea_level", label: "Pressure", unit: "hPa", scale: 10 },
-  { id: "wind_u_10m", label: "Wind U", unit: "m/s", scale: 8 },
-  { id: "wind_v_10m", label: "Wind V", unit: "m/s", scale: 8 },
-  { id: "wind_speed", label: "Wind speed", unit: "m/s", scale: 8 },
-];
 
 const COLORS = ["#60a5fa", "#34d399", "#f87171", "#fbbf24", "#a78bfa", "#22d3ee", "#f472b6", "#94a3b8"];
-
-function median(a: number[]) {
-  const s = [...a].sort((x, y) => x - y);
-  const m = Math.floor(s.length / 2);
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-}
-function percentile(a: number[], p: number) {
-  const s = [...a].sort((x, y) => x - y);
-  const idx = (s.length - 1) * p;
-  const lo = Math.floor(idx), hi = Math.ceil(idx);
-  if (lo === hi) return s[lo];
-  return s[lo] + (s[hi] - s[lo]) * (idx - lo);
-}
-function std(a: number[]) {
-  const m = a.reduce((x, y) => x + y, 0) / a.length;
-  return Math.sqrt(a.reduce((x, y) => x + (y - m) ** 2, 0) / a.length);
-}
 
 export default function Home() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
@@ -80,7 +45,6 @@ export default function Home() {
   const [notice, setNotice] = useState<string | null>(null);
 
   const varMeta = VARS.find((v) => v.id === variable) || VARS[0];
-  const modelLabel = (id: string) => MODELS.find((m) => m.id === id)?.label || id;
   function modelValueAt(r: any, v: string, idx: number) {
     if (isEnsemble(r)) {
       const arr = (r._ensemble || []).map((m: any) => m.data?.[v]?.[idx]).filter((x: any) => typeof x === "number");
@@ -176,29 +140,7 @@ export default function Home() {
       }
       allResults.forEach((r: any) => {
         if (r.status && r.status !== "ok") return;
-        if (r.forecasts?.[0]) {
-          r._times = r.forecasts[0].validTimes || [];
-          r._data = r.forecasts[0].data || {};
-          r._ensemble = r.forecasts[0].ensembleMembers || null;
-        } else {
-          r._times = r.analysisTimes || [];
-          r._data = r.data || {};
-          r._ensemble = null;
-        }
-        if (variable === "wind_speed") {
-          const u = r._data["wind_u_10m"] || [];
-          const v = r._data["wind_v_10m"] || [];
-          r._data["wind_speed"] = u.map((val: number, i: number) => (typeof val === "number" && typeof v[i] === "number") ? Math.sqrt(val * val + v[i] * v[i]) : null);
-        }
-        if (variable === "wind_speed" && Array.isArray(r._ensemble)) {
-          r._ensemble.forEach((m: any) => {
-            const u = m.data?.wind_u_10m || [];
-            const v = m.data?.wind_v_10m || [];
-            m.data = m.data || {};
-            m.data.wind_speed = u.map((val: number, i: number) => (typeof val === "number" && typeof v[i] === "number") ? Math.sqrt(val * val + v[i] * v[i]) : null);
-          });
-        }
-
+        normalizeResult(r, variable);
       });
       setData({ results: allResults });
     } catch (e: any) {
@@ -362,18 +304,16 @@ export default function Home() {
       const vals = multiVals[i]; if (!vals.length) return 0;
       return Math.max(...vals) - Math.min(...vals);
     }));
-    function nearestIndex(target: number) {
-      let best = 0, bestDiff = Infinity;
-      leadHours.forEach((h, i) => { const d = Math.abs(h - target); if (d < bestDiff) { bestDiff = d; best = i; } });
-      return best;
-    }
     const inRangeTargets = [24, 72, 168].filter((t) => t <= (leadHours[leadHours.length - 1] || 0));
-    const avgSpread = inRangeTargets.map((t) => spread[nearestIndex(t)]).filter((v: any) => typeof v === "number");
-    const avgInter = inRangeTargets.map((t) => interdev[nearestIndex(t)]).filter((v: any) => typeof v === "number");
-    const ns = Math.min(1, (avgSpread.reduce((a, b) => a + b, 0) / (avgSpread.length || 1)) / varMeta.scale);
-    const ni = Math.min(1, (avgInter.reduce((a, b) => a + b, 0) / (avgInter.length || 1)) / varMeta.scale);
-    const score = Math.round(100 * (1 - (ns + ni) / 2));
-    const label = score >= 70 ? "High" : score >= 40 ? "Medium" : "Low";
+    const avgSpread = inRangeTargets.map((t) => spread[nearestIndex(leadHours, t)]).filter((v: any) => typeof v === "number");
+    const avgInter = inRangeTargets.map((t) => interdev[nearestIndex(leadHours, t)]).filter((v: any) => typeof v === "number");
+    const allVals = multiVals.flat().filter((v: any) => typeof v === "number");
+    const observedRange = allVals.length ? Math.max(...allVals) - Math.min(...allVals) : 1;
+    const { score, label } = confidenceScore(
+      avgSpread.reduce((a, b) => a + b, 0) / (avgSpread.length || 1),
+      avgInter.reduce((a, b) => a + b, 0) / (avgInter.length || 1),
+      observedRange
+    );
     let bigIdx = 0, bigVal = 0, bigA = "", bigB = "";
     leads.forEach((t, i) => {
       const pts = results.map((r: any) => {
@@ -389,7 +329,7 @@ export default function Home() {
     });
     const spreadAt = (target: number) => {
       if (target > (leadHours[leadHours.length - 1] || 0)) return "—";
-      const i = nearestIndex(target);
+      const i = nearestIndex(leadHours, target);
       return (spread[i] || 0).toFixed(2);
     };
     return { leads, leadHours, spread, multiMedian, interdev, score, label, thr, agreeUntil, maxSplit, bigH: bigIdx, bigVal, bigA, bigB, spreadAt, runAge: results.map((r: any) => `${modelLabel(r.dataProduct.id)}: ${r.forecasts?.[0]?.initTime || r.analysisTimes?.[0] || "n/a"}`).join(", "), ensMedian };
