@@ -153,7 +153,7 @@ export default function Home() {
         const res = await fetch(`${API}/api/point`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ latitude: Number(lat), longitude: Number(lon), products: forecastModels, variables: fetchVars, maxLeadTimeHours: maxLead, initTime: snapshot === "latest" ? "latest" : snapshot }),
+          body: JSON.stringify({ latitude: Number(lat), longitude: Number(lon), products: forecastModels, variables: fetchVars, maxLeadTimeHours: maxLead, ...(snapshot === "latest" ? {} : { initTime: snapshot }) }),
           signal: ctrl?.signal,
         });
         if (!res.ok) throw new Error(await res.text());
@@ -367,11 +367,9 @@ export default function Home() {
       leadHours.forEach((h, i) => { const d = Math.abs(h - target); if (d < bestDiff) { bestDiff = d; best = i; } });
       return best;
     }
-    const idx24 = nearestIndex(24);
-    const idx72 = nearestIndex(72);
-    const idx7d = nearestIndex(168);
-    const avgSpread = [spread[idx24], spread[idx72], spread[idx7d]].filter((v: any) => typeof v === "number");
-    const avgInter = [interdev[idx24], interdev[idx72], interdev[idx7d]].filter((v: any) => typeof v === "number");
+    const inRangeTargets = [24, 72, 168].filter((t) => t <= (leadHours[leadHours.length - 1] || 0));
+    const avgSpread = inRangeTargets.map((t) => spread[nearestIndex(t)]).filter((v: any) => typeof v === "number");
+    const avgInter = inRangeTargets.map((t) => interdev[nearestIndex(t)]).filter((v: any) => typeof v === "number");
     const ns = Math.min(1, (avgSpread.reduce((a, b) => a + b, 0) / (avgSpread.length || 1)) / varMeta.scale);
     const ni = Math.min(1, (avgInter.reduce((a, b) => a + b, 0) / (avgInter.length || 1)) / varMeta.scale);
     const score = Math.round(100 * (1 - (ns + ni) / 2));
@@ -390,6 +388,7 @@ export default function Home() {
       if (diff > bigVal) { bigVal = diff; bigIdx = leadHours[i]; bigA = pts[0].id; bigB = pts[pts.length - 1].id; }
     });
     const spreadAt = (target: number) => {
+      if (target > (leadHours[leadHours.length - 1] || 0)) return "—";
       const i = nearestIndex(target);
       return (spread[i] || 0).toFixed(2);
     };
@@ -456,7 +455,7 @@ export default function Home() {
 
       <div className="flex">
         {/* Left rail */}
-        <aside className="w-72 shrink-0 border-r border-border bg-card p-4 md:block">
+        <aside className="w-72 shrink-0 border-r border-border bg-card p-4">
           <div className="space-y-4">
             <div>
               <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">Location</div>
@@ -574,7 +573,7 @@ export default function Home() {
                   <div className="grid text-xs" style={{ gridTemplateColumns: `120px repeat(${Math.ceil((stats?.leads.length || 0) / 6)}, 1fr)` }}>
                     <div />
                     {(stats?.leads || []).filter((_: any, i: number) => i % 6 === 0).map((t: string) => (
-                      <div key={t} className="text-center text-muted-foreground font-mono">{t.slice(11,16)}</div>
+                      <div key={t} className="text-center text-muted-foreground font-mono">{t.slice(0,10)} {t.slice(11,16)}</div>
                     ))}
                     {results.filter((r: any) => (r._times || []).length).map((r: any) => (
                       <>
@@ -604,7 +603,7 @@ export default function Home() {
                     <tbody>
                       {(stats?.leads || []).map((t: string) => (
                         <tr key={t} className="border-t border-border">
-                          <td className="p-1 font-mono">{t.slice(11,16)}</td>
+                          <td className="p-1 font-mono">{t.slice(0,10)} {t.slice(11,16)}</td>
                           {results.map((r: any) => {
                             const idx = (r._times || []).indexOf(t);
                             const v = idx >= 0 ? modelValueAt(r, variable, idx) : null;
