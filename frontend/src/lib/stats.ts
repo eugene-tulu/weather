@@ -43,7 +43,11 @@ export interface ConfidenceResult {
   label: "High" | "Medium" | "Low";
 }
 
-export function confidenceScore(avgSpread: number, avgInter: number, observedRange: number): ConfidenceResult {
+export function confidenceScore(
+  avgSpread: number,
+  avgInter: number,
+  observedRange: number,
+): ConfidenceResult {
   const base = Math.max(1, observedRange);
   const ns = Math.min(1, avgSpread / base);
   const ni = Math.min(1, avgInter / base);

@@ -1,629 +1,1343 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-/* eslint-disable react-hooks/set-state-in-effect */
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Checkbox } from "@/components/ui/checkbox";
+/* eslint-disable react-hooks/set-state-in-effect -- URL, theme, and external fetch state are synchronized from effects */
+
 import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-} from "@/components/ui/chart";
-import { Line, LineChart, Area, XAxis, YAxis, CartesianGrid, Legend } from "recharts";
-import { MODELS, VARS, modelLabel } from "@/lib/models";
-import { median, percentile, std, nearestIndex, confidenceScore } from "@/lib/stats";
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
+import { Area, CartesianGrid, ComposedChart, Line, XAxis, YAxis } from "recharts";
+
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { ChartContainer } from "@/components/ui/chart";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { ApiError, fetchAnalysis, fetchForecast, fetchGeocode, fetchRuns } from "@/lib/api";
+import { buildChartData, computeStats, formatRunAge, toCsv, valueAtTime } from "@/lib/forecast";
+import { COLORS, MODELS, VARS, modelLabel } from "@/lib/models";
 import { normalizeResult } from "@/lib/normalize";
+import type { ApiResult, GeocodeResult, NormalizedResult, RunOption } from "@/lib/types";
+import { useFocusTrap } from "@/lib/useFocusTrap";
 
-const API = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+const DEFAULT_MODELS = [
+  "noaa-gfs-forecast",
+  "noaa-hrrr-forecast-48-hour",
+  "noaa-gefs-forecast-35-day",
+  "noaa-gfs-analysis",
+];
 
+const TAB_ORDER = ["fan", "spaghetti", "agreement", "table"] as const;
+type Tab = (typeof TAB_ORDER)[number];
 
-
-const COLORS = ["#60a5fa", "#34d399", "#f87171", "#fbbf24", "#a78bfa", "#22d3ee", "#f472b6", "#94a3b8"];
-
-export default function Home() {
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+export default function Page() {
+  const [lat, setLat] = useState("41.8781");
+  const [lon, setLon] = useState("-87.6298");
   const [q, setQ] = useState("");
-  const [suggestions, setSuggestions] = useState<any[]>([]);
-  const [lat, setLat] = useState("41.88");
-  const [lon, setLon] = useState("-87.63");
+  const [suggestions, setSuggestions] = useState<GeocodeResult[]>([]);
   const [variable, setVariable] = useState("temperature_2m");
-  const [models, setModels] = useState<string[]>(["noaa-gfs-forecast", "noaa-hrrr-forecast-48-hour", "noaa-gefs-forecast-35-day", "noaa-gfs-analysis"]);
+  const [models, setModels] = useState<string[]>(DEFAULT_MODELS);
   const [maxLead, setMaxLead] = useState(48);
   const [snapshot, setSnapshot] = useState("latest");
-  const [runOptions, setRunOptions] = useState<string[]>(["latest"]);
-  const [latestInitTime, setLatestInitTime] = useState<string | null>(null);
-  const [tab, setTab] = useState<"fan" | "spaghetti" | "agreement" | "table">("fan");
-  const [data, setData] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [showHowTo, setShowHowTo] = useState(false);
-  const [railOpen, setRailOpen] = useState(false);
+  const [data, setData] = useState<{ results: ApiResult[] } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [runOptions, setRunOptions] = useState<RunOption[]>([]);
+  const [latestInitTime, setLatestInitTime] = useState<string | undefined>();
+  const [railOpen, setRailOpen] = useState(false);
+  const [tab, setTab] = useState<Tab>("fan");
+  const [locating, setLocating] = useState(false);
+  const [geoError, setGeoError] = useState<string | null>(null);
+  const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  const [urlReady, setUrlReady] = useState(false);
+  const [themeReady, setThemeReady] = useState(false);
+
+  const modalRef = useRef<HTMLDivElement>(null);
+  const railRef = useRef<HTMLElement>(null);
+  const previousPrimary = useRef<string | undefined>(undefined);
 
   const varMeta = VARS.find((v) => v.id === variable) || VARS[0];
-  function modelValueAt(r: any, v: string, idx: number) {
-    if (isEnsemble(r)) {
-      const arr = (r._ensemble || []).map((m: any) => m.data?.[v]?.[idx]).filter((x: any) => typeof x === "number");
-      return arr.length ? median(arr) : null;
+
+  const results = useMemo<NormalizedResult[]>(
+    () =>
+      (data?.results ?? [])
+        .filter((result) => !result.status || result.status === "ok")
+        .map((result) => normalizeResult(result)),
+    [data],
+  );
+
+  const stats = useMemo(
+    () => (results.length ? computeStats(results, variable, varMeta.scale) : null),
+    [results, variable, varMeta.scale],
+  );
+
+  const chartData = useMemo(
+    () => (results.length ? buildChartData(results, variable) : []),
+    [results, variable],
+  );
+
+  const errorResults = useMemo(
+    () => (data?.results ?? []).filter((result) => result.status === "error"),
+    [data],
+  );
+
+  const ensembleMemberCount = useMemo(
+    () => results.reduce((total, result) => total + (result._ensemble?.length || 0), 0),
+    [results],
+  );
+
+  const primaryModel = models[0];
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+
+    const latParam = params.get("lat");
+    if (latParam !== null) {
+      const value = Number(latParam);
+      if (Number.isFinite(value) && value >= -90 && value <= 90) {
+        setLat(String(value));
+      }
     }
-    return (r._data || {})[v]?.[idx] ?? null;
-  }
-  const abortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
-  }, [theme]);
+    const lonParam = params.get("lon");
+    if (lonParam !== null) {
+      const value = Number(lonParam);
+      if (Number.isFinite(value) && value >= -180 && value <= 180) {
+        setLon(String(value));
+      }
+    }
 
-  useEffect(() => {
-    if (q.trim().length < 2) { setSuggestions([]); return; }
-    const t = setTimeout(async () => {
-      try {
-        const res = await fetch(`${API}/api/geocode?q=${encodeURIComponent(q)}`);
-        const d = await res.json();
-        setSuggestions(d.results || []);
-      } catch { setSuggestions([]); }
-    }, 300);
-    return () => clearTimeout(t);
-  }, [q]);
+    const variableParam = params.get("v");
+    if (variableParam && VARS.some((v) => v.id === variableParam)) {
+      setVariable(variableParam);
+    }
 
-  // URL state
-  useEffect(() => {
-    if (models.length === 0) return;
-    fetch(`${API}/api/runs?dataProductId=${models[0]}&limit=5`)
-      .then((r) => r.json())
-      .then((d) => {
-        const opts = (d.runs || []).map((x: any) => x.initTime);
-        if (opts.length) { setRunOptions(["latest", ...opts]); setLatestInitTime(opts[0]); }
-      })
-      .catch(() => {});
-  }, [models]);
+    const modelIds = (params.get("models") || "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean);
+    const validModels = modelIds.filter((id) => MODELS.some((model) => model.id === id));
+    if (validModels.length) {
+      setModels(Array.from(new Set(validModels)));
+    }
 
-  useEffect(() => {
-    const p = new URLSearchParams(window.location.search);
-    if (p.has("lat")) setLat(p.get("lat")!);
-    if (p.has("lon")) setLon(p.get("lon")!);
-    if (p.has("v")) setVariable(p.get("v")!);
-    if (p.has("models")) setModels(p.get("models")!.split(",").filter(Boolean));
-    if (p.has("lead")) setMaxLead(Number(p.get("lead")));
-    if (p.has("snap")) setSnapshot(p.get("snap")!);
-    if (p.has("theme")) setTheme(p.get("theme") as any);
+    const leadParam = params.get("lead");
+    if (leadParam !== null) {
+      const value = Number(leadParam);
+      if (Number.isFinite(value)) {
+        setMaxLead(Math.min(840, Math.max(6, Math.round(value / 6) * 6)));
+      }
+    }
+
+    const snapshotParam = params.get("snap");
+    if (
+      snapshotParam === "latest" ||
+      (snapshotParam && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(snapshotParam))
+    ) {
+      setSnapshot(snapshotParam);
+    }
+
+    const themeParam = params.get("theme");
+    if (themeParam === "light" || themeParam === "dark") {
+      setTheme(themeParam);
+      setThemeReady(true);
+    }
+
+    setUrlReady(true);
   }, []);
 
   useEffect(() => {
-    const params = new URLSearchParams();
-    params.set("lat", lat); params.set("lon", lon); params.set("v", variable);
-    params.set("models", models.join(",")); params.set("lead", String(maxLead));
-    params.set("snap", snapshot); params.set("theme", theme);
-    window.history.replaceState(null, "", "?" + params.toString());
-  }, [lat, lon, variable, models, maxLead, snapshot, theme]);
-
-  function toggleModel(id: string) {
-    setModels((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  }
-
-  async function fetchForecast(ctrl?: AbortController) {
-    if (models.length === 0) { setError("Select at least one model."); return; }
-    setLoading(true); setError(null);
+    if (themeReady) return;
+    let stored: string | null = null;
     try {
-      const fetchVars = variable === "wind_speed" ? ["wind_u_10m", "wind_v_10m"] : [variable];
-      const forecastModels = models.filter((m) => !m.includes("analysis"));
-      const analysisModels = models.filter((m) => m.includes("analysis"));
-      const allResults: any[] = [];
-      if (forecastModels.length) {
-        const res = await fetch(`${API}/api/point`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ latitude: Number(lat), longitude: Number(lon), products: forecastModels, variables: fetchVars, maxLeadTimeHours: maxLead, ...(snapshot === "latest" ? {} : { initTime: snapshot }) }),
-          signal: ctrl?.signal,
-        });
-        if (!res.ok) throw new Error(await res.text());
-        const json = await res.json();
-        allResults.push(...(json.results || []));
-      }
-      if (analysisModels.length) {
-        const init = snapshot === "latest" ? (latestInitTime || new Date().toISOString()) : snapshot;
-        const initDate = new Date(init);
-        const endMs = Math.min(Date.now(), initDate.getTime() + maxLead * 3600 * 1000);
-        const res = await fetch(`${API}/api/analysis`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ latitude: Number(lat), longitude: Number(lon), products: analysisModels, variables: fetchVars, startTime: initDate.toISOString(), endTime: new Date(endMs).toISOString() }),
-          signal: ctrl?.signal,
-        });
-        if (!res.ok) throw new Error(await res.text());
-        const json = await res.json();
-        allResults.push(...(json.results || []));
-      }
-      allResults.forEach((r: any) => {
-        if (r.status && r.status !== "ok") return;
-        normalizeResult(r, variable);
-      });
-      setData({ results: allResults });
-    } catch (e: any) {
-      if (e?.name === "AbortError") return;
-      setError(e.message);
+      stored = localStorage.getItem("theme");
+    } catch {
+      stored = null;
     }
-    finally { setLoading(false); }
-
-  }
+    const initial =
+      stored === "light" || stored === "dark"
+        ? stored
+        : document.documentElement.classList.contains("dark")
+          ? "dark"
+          : "light";
+    setTheme(initial);
+    setThemeReady(true);
+  }, [themeReady]);
 
   useEffect(() => {
-    const keep = (id: string) => {
-      const m = MODELS.find((x) => x.id === id);
-      return !m || m.type === "Analysis" || m.horizon >= maxLead;
-    };
-    const dropped = models.filter((id) => !keep(id)).map((id) => MODELS.find((x) => x.id === id)?.label || id);
-    if (dropped.length) {
-      setModels((prev) => prev.filter(keep));
-      setNotice(`${dropped.join(", ")} dropped: horizon shorter than ${maxLead}h.`);
+    if (!themeReady) return;
+    document.documentElement.classList.toggle("dark", theme === "dark");
+    try {
+      localStorage.setItem("theme", theme);
+    } catch {
+      // Storage can be unavailable in private contexts.
     }
+  }, [theme, themeReady]);
+
+  useEffect(() => {
+    if (!urlReady) return;
+    const params = new URLSearchParams();
+    params.set("lat", lat);
+    params.set("lon", lon);
+    params.set("v", variable);
+    params.set("models", models.join(","));
+    params.set("lead", String(maxLead));
+    params.set("snap", snapshot);
+    params.set("theme", theme);
+    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+  }, [urlReady, lat, lon, variable, models, maxLead, snapshot, theme]);
+
+  useEffect(() => {
+    if (!primaryModel) {
+      setRunOptions([]);
+      setLatestInitTime(undefined);
+      return;
+    }
+
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const result = await fetchRuns(primaryModel, controller.signal);
+        if (controller.signal.aborted) return;
+        const options = result.runs ?? [];
+        setRunOptions(options);
+        setLatestInitTime(options[0]?.initTime);
+      } catch (reason) {
+        if (controller.signal.aborted) return;
+        if (reason instanceof ApiError && reason.status === 0) return;
+        setRunOptions([]);
+        setLatestInitTime(undefined);
+      }
+    })();
+
+    return () => controller.abort();
+  }, [primaryModel]);
+
+  useEffect(() => {
+    if (previousPrimary.current !== undefined && previousPrimary.current !== primaryModel) {
+      setSnapshot("latest");
+    }
+    previousPrimary.current = primaryModel;
+  }, [primaryModel]);
+
+  useEffect(() => {
+    if (
+      snapshot !== "latest" &&
+      runOptions.length > 0 &&
+      !runOptions.some((option) => option.initTime === snapshot)
+    ) {
+      setSnapshot("latest");
+    }
+  }, [runOptions, snapshot]);
+
+  useEffect(() => {
+    if (!models.length) return;
+
+    const dropped = models.filter((id) => {
+      const model = MODELS.find((entry) => entry.id === id);
+      return !model || (model.type !== "Analysis" && model.horizon < maxLead);
+    });
+    if (!dropped.length) return;
+
+    const kept = models.filter((id) => !dropped.includes(id));
+    setModels(kept);
+    setNotice(`${dropped.map(modelLabel).join(", ")} dropped: horizon shorter than ${maxLead}h.`);
   }, [maxLead, models]);
 
   useEffect(() => {
+    const query = q.trim();
+    if (query.length < 2) {
+      setSuggestions([]);
+      setGeoError(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const result = await fetchGeocode(query, controller.signal);
+          if (controller.signal.aborted) return;
+          setSuggestions(result.results ?? []);
+          setGeoError(null);
+        } catch (reason) {
+          if (controller.signal.aborted) return;
+          if (reason instanceof ApiError && reason.status === 0) return;
+          setSuggestions([]);
+          setGeoError("Could not search locations.");
+        }
+      })();
+    }, 300);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [q]);
+
+  useEffect(() => {
+    if (!urlReady) return;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void (async () => {
+        if (models.length === 0) {
+          setData(null);
+          setLoading(false);
+          setError("Select at least one model.");
+          return;
+        }
+
+        const latitude = Number(lat);
+        const longitude = Number(lon);
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+          setData(null);
+          setLoading(false);
+          setError("Coordinates are not valid.");
+          return;
+        }
+
+        setLoading(true);
+        setError(null);
+        setData(null);
+
+        const forecastModels = models.filter((id) => !id.includes("analysis"));
+        const analysisModels = models.filter((id) => id.includes("analysis"));
+        const fetchVariables =
+          variable === "wind_speed" ? ["wind_u_10m", "wind_v_10m"] : [variable];
+        const initTime = snapshot === "latest" ? undefined : snapshot;
+
+        const pointBody = {
+          latitude,
+          longitude,
+          products: forecastModels,
+          variables: fetchVariables,
+          maxLeadTimeHours: maxLead,
+          ...(initTime ? { initTime } : {}),
+        };
+
+        const requestedAnalysisStart =
+          snapshot === "latest"
+            ? latestInitTime || new Date(Date.now() - 3_600_000).toISOString()
+            : snapshot;
+        const requestedStartMs = new Date(requestedAnalysisStart).getTime();
+        const analysisStartMs =
+          Number.isFinite(requestedStartMs) && requestedStartMs < Date.now()
+            ? requestedStartMs
+            : Date.now() - 3_600_000;
+        const analysisStartTime = new Date(analysisStartMs).toISOString();
+        const analysisEndMs = Math.min(
+          Date.now(),
+          analysisStartMs + maxLead * 3_600_000,
+          analysisStartMs + 31 * 24 * 3_600_000,
+        );
+        const analysisEnd = new Date(analysisEndMs).toISOString();
+
+        const analysisBody = {
+          latitude,
+          longitude,
+          products: analysisModels,
+          variables: fetchVariables,
+          startTime: analysisStartTime,
+          endTime: analysisEnd,
+        };
+
+        try {
+          const [pointResult, analysisResult] = await Promise.all([
+            forecastModels.length
+              ? fetchForecast(pointBody, controller.signal)
+              : Promise.resolve({ results: [] as ApiResult[] }),
+            analysisModels.length
+              ? fetchAnalysis(analysisBody, controller.signal)
+              : Promise.resolve({ results: [] as ApiResult[] }),
+          ]);
+
+          if (controller.signal.aborted) return;
+          setData({
+            results: [...(pointResult.results ?? []), ...(analysisResult.results ?? [])],
+          });
+        } catch (reason) {
+          if (controller.signal.aborted) return;
+          if (reason instanceof ApiError) {
+            setError(reason.status === 0 ? "Request timed out. Try again." : reason.message);
+          } else {
+            setError(reason instanceof Error ? reason.message : "Could not load forecast.");
+          }
+          setData(null);
+        } finally {
+          if (!controller.signal.aborted) setLoading(false);
+        }
+      })();
+    }, 400);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [urlReady, lat, lon, variable, models, maxLead, snapshot, latestInitTime]);
+
+  useEffect(() => {
     if (!notice) return;
-    const t = setTimeout(() => setNotice(null), 3000);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => setNotice(null), 3_000);
+    return () => clearTimeout(timer);
   }, [notice]);
 
   useEffect(() => {
-    const ctrl = new AbortController();
-    abortRef.current?.abort();
-    abortRef.current = ctrl;
-    const t = setTimeout(() => {
-      fetchForecast(ctrl);
-    }, 400);
-    return () => { clearTimeout(t); ctrl.abort(); };
-  }, [lat, lon, variable, models, maxLead, snapshot, latestInitTime]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!copyStatus) return;
+    const timer = setTimeout(() => setCopyStatus(null), 2_000);
+    return () => clearTimeout(timer);
+  }, [copyStatus]);
 
-  function useMyLocation() {
-    if (!navigator.geolocation) return;
-    navigator.geolocation.getCurrentPosition((pos) => {
-      setLat(pos.coords.latitude.toFixed(4));
-      setLon(pos.coords.longitude.toFixed(4));
-    });
-  }
+  const closeModal = useCallback(() => setShowHowTo(false), []);
+  const closeRail = useCallback(() => setRailOpen(false), []);
 
-  const results = (data?.results || []).filter((r: any) => !r.status || r.status === "ok");
+  useFocusTrap(showHowTo, modalRef, closeModal);
+  useFocusTrap(railOpen && !showHowTo, railRef, closeRail);
 
-  function buildChartData() {
-    const tsSet = new Set<string>();
-    results.forEach((r: any) => (r._times || []).forEach((t: string) => tsSet.add(t)));
-    const sorted = [...tsSet].sort();
-    // ensemble bands aligned by lead index
-    const ensModels = results.filter(isEnsemble);
-    const allMembers = ensModels.flatMap((r: any) => r._ensemble || []);
-    return sorted.map((t, idx) => {
-      const row: any = { time: t.slice(5, 16).replace("T", " ") };
-      const vals = allMembers.map((m: any) => {
-        if (variable === "wind_speed") {
-          const u = m.data?.wind_u_10m?.[idx]; const v = m.data?.wind_v_10m?.[idx];
-          return (typeof u === "number" && typeof v === "number") ? Math.sqrt(u * u + v * v) : null;
-        }
-        return m.data?.[variable]?.[idx] ?? null;
-      }).filter((v: any) => typeof v === "number");
-      if (vals.length) {
-        row._ensMedian = median(vals);
-        row._p50Low = percentile(vals, 0.25);
-        row._p50High = percentile(vals, 0.75);
-        row._p90Low = percentile(vals, 0.05);
-        row._p90High = percentile(vals, 0.95);
-      }
-      results.forEach((r: any) => {
-        const idx = (r._times || []).indexOf(t);
-        if (idx < 0) return;
-        const id = r.dataProduct.id;
-        if (Array.isArray(r._ensemble)) {
-          const vals = r._ensemble.map((m: any) => m.data?.[variable === "wind_speed" ? "wind_u_10m" : variable]?.[idx]).filter((v: any) => typeof v === "number");
-          // for wind speed use u/v
-          if (variable === "wind_speed") {
-            const us = r._ensemble.map((m: any) => m.data?.wind_u_10m?.[idx]);
-            const vs = r._ensemble.map((m: any) => m.data?.wind_v_10m?.[idx]);
-            const speeds = us.map((u: any, i: number) => (typeof u === "number" && typeof vs[i] === "number") ? Math.sqrt(u * u + vs[i] * vs[i]) : null).filter((v: any) => v !== null);
-            if (speeds.length) {
-              row[id] = speeds.reduce((a: number, b: number) => a + b, 0) / speeds.length;
-              row[`${id}_min`] = Math.min(...speeds);
-              row[`${id}_max`] = Math.max(...speeds);
-            }
-          } else if (vals.length) {
-            row[id] = vals.reduce((a: number, b: number) => a + b, 0) / vals.length;
-            const all = r._ensemble.map((m: any) => m.data?.[variable]?.[idx]).filter((v: any) => typeof v === "number");
-            row[`${id}_min`] = Math.min(...all);
-            row[`${id}_max`] = Math.max(...all);
-          }
-          // member keys for spaghetti
-          (r._ensemble || []).forEach((m: any, mi: number) => {
-            if (variable === "wind_speed") {
-              const u = m.data?.wind_u_10m?.[idx]; const v = m.data?.wind_v_10m?.[idx];
-              row[`${id}_m${mi}`] = (typeof u === "number" && typeof v === "number") ? Math.sqrt(u * u + v * v) : null;
-            } else {
-              row[`${id}_m${mi}`] = m.data?.[variable]?.[idx] ?? null;
-            }
-          });
-        } else {
-          row[id] = (r._data || {})[variable]?.[idx] ?? null;
-        }
-      });
-      return row;
-    });
-  }
-
-  function isEnsemble(r: any) { return Array.isArray(r._ensemble); }
-
-  // computations for confidence/headline/cards
-  function computeStats() {
-    if (!results.length) return null;
-    const tsSet = new Set<string>();
-    results.forEach((r: any) => (r._times || []).forEach((t: string) => tsSet.add(t)));
-    const leads = [...tsSet].sort();
-    const initTime = results[0]?.forecasts?.[0]?.initTime || results[0]?.analysisTimes?.[0] || leads[0];
-    const leadHours = leads.map((t) => Math.round((new Date(t).getTime() - new Date(initTime).getTime()) / 3.6e6));
-    const modelValue = (r: any, idx: number) => {
-      if (isEnsemble(r)) {
-        const arr = (r._ensemble || []).map((m: any) => m.data?.[variable]?.[idx]).filter((x: any) => typeof x === "number");
-        return arr.length ? median(arr) : null;
-      }
-      return (r._data || {})[variable]?.[idx] ?? null;
-    };
-    const modelPoints = leads.map((t) =>
-      results.map((r: any) => {
-        const idx = (r._times || []).indexOf(t);
-        if (idx < 0) return null;
-        const v = modelValue(r, idx);
-        return typeof v === "number" ? v : null;
-      }).filter((v: any) => v !== null)
+  const toggleModel = useCallback((id: string) => {
+    setModels((previous) =>
+      previous.includes(id) ? previous.filter((entry) => entry !== id) : [...previous, id],
     );
-    const ensModels = results.filter(isEnsemble);
-    const allMembers: number[][] = [];
-    ensModels.forEach((r: any) => (r._ensemble || []).forEach((m: any) => {
-      const arr = leads.map((t) => {
-        const idx = (r._times || []).indexOf(t);
-        if (idx < 0) return null;
-        if (variable === "wind_speed") {
-          const u = m.data?.wind_u_10m?.[idx]; const v = m.data?.wind_v_10m?.[idx];
-          return (typeof u === "number" && typeof v === "number") ? Math.sqrt(u * u + v * v) : null;
-        }
-        return m.data?.[variable]?.[idx] ?? null;
-      });
-      allMembers.push(arr);
-    }));
-    const ensMedian = leads.map((_, i) => {
-      const vals = allMembers.map((m) => m[i]).filter((v: any) => typeof v === "number");
-      return vals.length ? median(vals) : null;
-    });
-    const spread = leads.map((_, i) => {
-      const vals = allMembers.map((m) => m[i]).filter((v: any) => typeof v === "number");
-      return vals.length > 1 ? std(vals) : 0;
-    });
-    const multiVals = leads.map((_, i) => [...modelPoints[i], ...(ensMedian[i] !== null ? [ensMedian[i]!] : [])]);
-    const multiMedian = multiVals.map((vals) => (vals.length ? median(vals) : null));
-    const interdev = multiVals.map((vals) => (vals.length > 1 ? std(vals) : 0));
-    const thr = varMeta.scale * 0.3;
-    let agreeUntil = leadHours[leadHours.length - 1] || 0;
-    for (let i = 0; i < leads.length; i++) {
-      if ((spread[i] || 0) > thr || (interdev[i] || 0) > thr) { agreeUntil = leadHours[i]; break; }
+    setNotice(null);
+  }, []);
+
+  const handleUseMyLocation = useCallback(() => {
+    if (!navigator.geolocation) {
+      setGeoError("Geolocation is not available in this browser.");
+      return;
     }
-    const maxSplit = Math.max(0, ...leads.map((_, i) => {
-      const vals = multiVals[i]; if (!vals.length) return 0;
-      return Math.max(...vals) - Math.min(...vals);
-    }));
-    const inRangeTargets = [24, 72, 168].filter((t) => t <= (leadHours[leadHours.length - 1] || 0));
-    const avgSpread = inRangeTargets.map((t) => spread[nearestIndex(leadHours, t)]).filter((v: any) => typeof v === "number");
-    const avgInter = inRangeTargets.map((t) => interdev[nearestIndex(leadHours, t)]).filter((v: any) => typeof v === "number");
-    const perTsRanges = leads.map((_, i) => {
-      const vals = multiVals[i].filter((v: any) => typeof v === "number");
-      return vals.length ? Math.max(...vals) - Math.min(...vals) : 0;
-    }).filter((v) => v > 0);
-    const observedRange = perTsRanges.length ? median(perTsRanges) : 1;
-    const { score, label } = confidenceScore(
-      avgSpread.reduce((a, b) => a + b, 0) / (avgSpread.length || 1),
-      avgInter.reduce((a, b) => a + b, 0) / (avgInter.length || 1),
-      observedRange
+
+    setLocating(true);
+    setGeoError(null);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setLat(position.coords.latitude.toFixed(4));
+        setLon(position.coords.longitude.toFixed(4));
+        setQ("");
+        setSuggestions([]);
+        setLocating(false);
+      },
+      (positionError) => {
+        setGeoError(
+          positionError.code === positionError.PERMISSION_DENIED
+            ? "Location permission denied."
+            : "Could not get your location.",
+        );
+        setLocating(false);
+      },
+      {
+        enableHighAccuracy: false,
+        timeout: 10_000,
+        maximumAge: 300_000,
+      },
     );
-    let bigIdx = 0, bigVal = 0, bigA = "", bigB = "";
-    leads.forEach((t, i) => {
-      const pts = results.map((r: any) => {
-        const idx = (r._times || []).indexOf(t);
-        if (idx < 0) return null;
-        const v = modelValue(r, idx);
-        return typeof v === "number" ? { id: r.dataProduct.id, v } : null;
-      }).filter((x: any) => x !== null);
-      if (pts.length < 2) return;
-      pts.sort((a: any, b: any) => a.v - b.v);
-      const diff = pts[pts.length - 1].v - pts[0].v;
-      if (diff > bigVal) { bigVal = diff; bigIdx = leadHours[i]; bigA = pts[0].id; bigB = pts[pts.length - 1].id; }
-    });
-    const spreadAt = (target: number) => {
-      if (target > (leadHours[leadHours.length - 1] || 0)) return "—";
-      const i = nearestIndex(leadHours, target);
-      return (spread[i] || 0).toFixed(2);
-    };
-    return { leads, leadHours, spread, multiMedian, interdev, score, label, thr, agreeUntil, maxSplit, bigH: bigIdx, bigVal, bigA, bigB, spreadAt, runAge: results.map((r: any) => `${modelLabel(r.dataProduct.id)}: ${r.forecasts?.[0]?.initTime || r.analysisTimes?.[0] || "n/a"}`).join(", "), ensMedian };
-  }
+  }, []);
 
-  const stats = data ? computeStats() : null;
-  const chartData = data ? buildChartData() : [];
+  const copyText = useCallback(async (text: string, label: string) => {
+    try {
+      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+      setCopyStatus(`${label} copied`);
+    } catch {
+      setCopyStatus("Copy failed");
+    }
+  }, []);
 
-  function exportCsv() {
+  const copyJson = useCallback(() => {
     if (!data) return;
-    const tsSet = new Set<string>();
-    results.forEach((r: any) => (r._times || []).forEach((t: string) => tsSet.add(t)));
-    const sorted = [...tsSet].sort();
-    const header = ["timestamp", ...results.map((r: any) => r.dataProduct.id)].join(",");
-    const lines = sorted.map((t) => {
-      const vals = results.map((r: any) => {
-        const idx = (r._times || []).indexOf(t);
-        if (idx < 0) return "";
-        if (isEnsemble(r)) {
-          const arr = r._ensemble.map((m: any) => {
-            if (variable === "wind_speed") {
-              const u = m.data?.wind_u_10m?.[idx]; const v = m.data?.wind_v_10m?.[idx];
-              return (typeof u === "number" && typeof v === "number") ? Math.sqrt(u * u + v * v) : null;
-            }
-            return m.data?.[variable]?.[idx];
-          }).filter((x: any) => typeof x === "number");
-          return arr.length ? (arr.reduce((a: number, b: number) => a + b, 0) / arr.length).toFixed(3) : "";
-        }
-        return (r._data || {})[variable]?.[idx] ?? "";
-      });
-      return [t, ...vals].join(",");
-    });
-    const csv = [header, ...lines].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
+    void copyText(JSON.stringify(data, null, 2), "JSON");
+  }, [copyText, data]);
+
+  const copyLink = useCallback(() => {
+    void copyText(window.location.href, "Link");
+  }, [copyText]);
+
+  const downloadCsv = useCallback(() => {
+    if (!results.length) return;
+    const csv = toCsv(results, variable, modelLabel);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = "forecast.csv"; a.click();
-    URL.revokeObjectURL(url);
-  }
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "forecast.csv";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1_000);
+  }, [results, variable]);
 
-  function copyJson() {
-    if (!data) return;
-    navigator.clipboard.writeText(JSON.stringify(data, null, 2));
-  }
+  const onTabKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+    event.preventDefault();
+    const nextIndex =
+      event.key === "ArrowRight"
+        ? (index + 1) % TAB_ORDER.length
+        : (index - 1 + TAB_ORDER.length) % TAB_ORDER.length;
+    const nextTab = TAB_ORDER[nextIndex];
+    setTab(nextTab);
+    document.getElementById(`tab-${nextTab}`)?.focus();
+  };
 
-  function copyLink() {
-    navigator.clipboard.writeText(window.location.href);
-  }
+  const spreadSummary = stats
+    ? `${stats.spreadAt(24)} / ${stats.spreadAt(72)} / ${stats.spreadAt(168)} ${varMeta.unit}`
+    : "—";
+
+  const runAgeSummary = stats
+    ? stats.runAges.map((run) => `${modelLabel(run.id)}: ${formatRunAge(run.time)}`).join(" · ")
+    : "—";
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <header className="flex items-center justify-between border-b border-border px-4 py-3 bg-card">
-        <div>
-          <div className="font-bold tracking-tight">Disagreement</div>
-          <div className="text-xs text-muted-foreground">Weather isn&apos;t a number. It&apos;s a disagreement.</div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="sm" className="md:hidden" onClick={() => setRailOpen(true)}>Controls</Button>
-          <Button variant="ghost" size="sm" onClick={() => setShowHowTo(true)}>How to read this</Button>
-          <Button variant="ghost" size="sm" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
-            {theme === "dark" ? "Light" : "Dark"}
-          </Button>
+    <div className="min-h-screen flex flex-col">
+      <header className="border-b border-border">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3">
+          <div className="size-8 rounded bg-primary text-primary-foreground grid place-items-center font-bold">
+            Δ
+          </div>
+          <div>
+            <h1 className="font-bold tracking-tight leading-none">Disagreement</h1>
+            <div className="text-xs text-muted-foreground">
+              Weather isn&apos;t a number. It&apos;s a disagreement.
+            </div>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => setShowHowTo(true)}>
+              How to read this
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+            >
+              {theme === "dark" ? "Light" : "Dark"}
+            </Button>
+            <Button
+              className="md:hidden focus-visible:ring-2 focus-visible:ring-ring"
+              variant="outline"
+              size="sm"
+              onClick={() => setRailOpen((open) => !open)}
+              aria-expanded={railOpen}
+              aria-controls="forecast-controls"
+            >
+              {railOpen ? "Close" : "Controls"}
+            </Button>
+          </div>
         </div>
       </header>
 
-      <div className="flex">
-        {/* Left rail */}
-        {railOpen && <div className="fixed inset-0 z-30 bg-black/50 md:hidden" onClick={() => setRailOpen(false)} />}
-        <aside className={`${railOpen ? "fixed inset-x-0 bottom-0 z-40 max-h-[70vh] overflow-auto w-full" : "hidden"} md:static md:block md:w-72 shrink-0 border-r border-border bg-card p-4`}>
-          <div className="md:hidden flex justify-end mb-2">
-            <Button variant="ghost" size="sm" onClick={() => setRailOpen(false)}>Close</Button>
-          </div>
-          <div className="space-y-4">
-            <div>
-              <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">Location</div>
-              <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search city…" className="mb-2" />
-              {suggestions.length > 0 && (
-                <div className="border border-border rounded-md max-h-40 overflow-auto mb-2">
-                  {suggestions.map((s) => (
-                    <button key={s.id} className="block w-full text-left px-2 py-1 text-sm hover:bg-accent/10" onClick={() => { setLat(String(s.latitude)); setLon(String(s.longitude)); setQ(s.name); setSuggestions([]); }}>
-                      {s.name}
-                    </button>
-                  ))}
+      <div className="max-w-7xl w-full mx-auto px-4 py-4 grid grid-cols-1 md:grid-cols-[300px_minmax(0,1fr)] gap-4 flex-1">
+        <aside
+          id="forecast-controls"
+          ref={railRef}
+          role={railOpen ? "dialog" : "region"}
+          aria-modal={railOpen ? "true" : undefined}
+          aria-label="Forecast controls"
+          className={`${
+            railOpen ? "block" : "hidden"
+          } md:block max-md:col-span-1 max-md:sticky max-md:bottom-[57px] max-md:z-20 max-md:bg-background max-md:pb-2 max-h-[inherit]`}
+        >
+          <Card>
+            <CardContent className="p-3 space-y-3">
+              <div className="flex items-center justify-between md:hidden">
+                <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                  Controls
                 </div>
-              )}
-              <Button variant="secondary" size="sm" onClick={useMyLocation} className="w-full mb-1">Use my location</Button>
-              <div className="font-mono text-xs text-muted-foreground">{lat}, {lon}</div>
-            </div>
+                <Button variant="ghost" size="sm" onClick={closeRail}>
+                  Close
+                </Button>
+              </div>
+              <div>
+                <label
+                  htmlFor="location-search"
+                  className="text-xs font-semibold uppercase tracking-wide text-muted-foreground"
+                >
+                  Location
+                </label>
+                <div className="flex gap-1 mt-1">
+                  <Input
+                    id="location-search"
+                    value={q}
+                    onChange={(event) => setQ(event.target.value)}
+                    placeholder="Search city…"
+                    role="combobox"
+                    aria-expanded={suggestions.length > 0}
+                    aria-controls="geocode-results"
+                    aria-autocomplete="list"
+                    aria-label="Search city"
+                    className="focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleUseMyLocation}
+                    disabled={locating}
+                  >
+                    {locating ? "Locating…" : "Use my location"}
+                  </Button>
+                </div>
+                {geoError && (
+                  <div className="text-xs text-destructive mt-1" role="alert">
+                    {geoError}
+                  </div>
+                )}
+                {suggestions.length > 0 && (
+                  <div
+                    id="geocode-results"
+                    role="listbox"
+                    aria-label="Location suggestions"
+                    className="mt-1 border border-border rounded max-h-40 overflow-auto bg-popover"
+                  >
+                    {suggestions.map((suggestion) => (
+                      <button
+                        key={
+                          suggestion.id ??
+                          `${suggestion.name}-${suggestion.latitude}-${suggestion.longitude}`
+                        }
+                        type="button"
+                        role="option"
+                        aria-selected={false}
+                        className="block w-full text-left px-2 py-1 text-sm hover:bg-accent/10 focus-visible:bg-accent/10 focus-visible:outline-none"
+                        onClick={() => {
+                          setLat(String(suggestion.latitude));
+                          setLon(String(suggestion.longitude));
+                          setQ(suggestion.name);
+                          setSuggestions([]);
+                          setGeoError(null);
+                        }}
+                      >
+                        {suggestion.name}
+                        {suggestion.admin1 || suggestion.country
+                          ? `, ${[suggestion.admin1, suggestion.country].filter(Boolean).join(", ")}`
+                          : ""}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
 
-            <div>
-              <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">Variable</div>
-              <div className="grid grid-cols-2 gap-1">
-                {VARS.map((v) => (
-                  <button key={v.id} className={`text-xs px-2 py-1 rounded border ${variable === v.id ? "bg-primary text-primary-foreground border-primary" : "border-border hover:bg-accent/10"}`} onClick={() => setVariable(v.id)}>
-                    {v.label}
+              <div className="text-[10.5px] text-muted-foreground font-mono">
+                {lat}, {lon}
+              </div>
+
+              <div className="flex flex-wrap gap-1">
+                {[
+                  { label: "Chicago", lat: "41.8781", lon: "-87.6298" },
+                  { label: "NYC", lat: "40.7128", lon: "-74.0060" },
+                  { label: "London", lat: "51.5072", lon: "-0.1276" },
+                  { label: "Tokyo", lat: "35.6762", lon: "139.6503" },
+                  { label: "Sydney", lat: "-33.8688", lon: "151.2093" },
+                ].map((city) => (
+                  <button
+                    key={city.label}
+                    type="button"
+                    onClick={() => {
+                      setLat(city.lat);
+                      setLon(city.lon);
+                      setQ(city.label);
+                      setSuggestions([]);
+                    }}
+                    className="text-xs px-2 py-1 rounded border border-border hover:bg-accent/10 focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {city.label}
                   </button>
                 ))}
               </div>
-            </div>
 
-            <div>
-              <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">Models</div>
-              {["Deterministic", "Ensemble", "Analysis"].map((grp) => (
-                <div key={grp} className="mb-2">
-                  <div className="text-xs text-muted-foreground mb-1">{grp}</div>
-                  {MODELS.filter((m) => m.type === grp).map((m) => {
-                    const avail = m.type === "Analysis" || m.horizon >= maxLead;
-                    return (
-                      <label key={m.id} className={`flex items-start gap-2 text-xs mb-1 ${avail ? "" : "opacity-40"}`} title={avail ? "" : `${m.label} does not reach ${maxLead}h`}>
-                        <Checkbox checked={models.includes(m.id)} disabled={!avail} onCheckedChange={() => avail && toggleModel(m.id)} />
-                        <span className="inline-block w-4 h-0.5 mt-1.5" style={{ background: m.color, borderTop: m.dash.length ? `2px dashed ${m.color}` : `2px solid ${m.color}` }} />
-                        <span>
-                          <span className="font-medium">{m.label}</span>
-                          <span className="block text-muted-foreground">{m.desc} · {m.type === "Analysis" ? "analysis" : m.horizon + "h"}</span>
-                        </span>
-                      </label>
-                    );
-                  })}
+              <div>
+                <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">
+                  Variable
                 </div>
-              ))}
-            </div>
+                <div className="grid grid-cols-2 gap-1">
+                  {VARS.map((entry) => (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      onClick={() => setVariable(entry.id)}
+                      className={`text-xs px-2 py-1 rounded border focus-visible:ring-2 focus-visible:ring-ring ${
+                        variable === entry.id
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "border-border hover:bg-accent/10"
+                      }`}
+                    >
+                      {entry.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
-            <div>
-              <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">Lead time (h)</div>
-              <input type="range" min={6} max={840} step={6} value={maxLead} onChange={(e) => setMaxLead(Number(e.target.value))} className="w-full" />
-              <div className="flex flex-wrap gap-1 mt-1">
-                {[6, 24, 48, 168, 384, 840].map((p) => (
-                  <Button key={p} size="sm" variant="secondary" onClick={() => setMaxLead(p)}>{p < 24 ? p + "h" : p < 168 ? Math.round(p / 24) + "d" : p === 168 ? "7d" : p === 384 ? "16d" : "35d"}</Button>
+              <div>
+                <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">
+                  Models
+                </div>
+                {(["Deterministic", "Ensemble", "Analysis"] as const).map((group) => (
+                  <div key={group} className="mb-2">
+                    <div className="text-xs text-muted-foreground mb-1">{group}</div>
+                    {MODELS.filter((model) => model.type === group).map((model) => {
+                      const available = model.type === "Analysis" || model.horizon >= maxLead;
+                      return (
+                        <div
+                          key={model.id}
+                          className={`flex items-start gap-2 text-xs mb-1 ${
+                            available ? "" : "opacity-40"
+                          }`}
+                        >
+                          <Checkbox
+                            checked={models.includes(model.id)}
+                            disabled={!available}
+                            onCheckedChange={() => {
+                              if (available) toggleModel(model.id);
+                            }}
+                            aria-label={model.label}
+                            className="mt-0.5"
+                          />
+                          <button
+                            type="button"
+                            className="text-left focus-visible:ring-2 focus-visible:ring-ring"
+                            disabled={!available}
+                            onClick={() => {
+                              if (available) toggleModel(model.id);
+                            }}
+                            title={available ? "" : `${model.label} does not reach ${maxLead}h`}
+                          >
+                            <span className="font-medium">{model.label}</span>
+                            <span className="block text-[10.5px] text-muted-foreground leading-snug">
+                              {model.desc} · <span className="font-mono">≤{model.horizon}h</span>
+                            </span>
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
                 ))}
               </div>
-              <div className="text-xs text-muted-foreground mt-1">0 → {maxLead}h</div>
-            </div>
 
-            <div>
-              <div className="text-xs font-semibold text-muted-foreground uppercase mb-1">Snapshot</div>
-              <select className="w-full border border-border rounded px-2 py-1 bg-background text-sm" value={snapshot} onChange={(e) => setSnapshot(e.target.value)}>
-                <option value="latest">Latest run</option>
-                {runOptions.filter((r) => r !== "latest").map((rt) => (
-                  <option key={rt} value={rt}>{rt}</option>
-                ))}
-              </select>
+              <div>
+                <label
+                  htmlFor="lead-time"
+                  className="text-xs font-semibold text-muted-foreground uppercase"
+                >
+                  Forecast horizon
+                </label>
+                <input
+                  id="lead-time"
+                  type="range"
+                  min={6}
+                  max={840}
+                  step={6}
+                  value={maxLead}
+                  onChange={(event) => setMaxLead(Number(event.target.value))}
+                  className="w-full mt-1 focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-valuetext={`${maxLead} hours`}
+                />
+                <div className="text-xs text-muted-foreground mt-1">0 → {maxLead}h</div>
+              </div>
 
-            </div>
-
-            {error && <div className="text-xs text-destructive">{error}</div>}
-          </div>
+              <div>
+                <label
+                  htmlFor="snapshot"
+                  className="text-xs font-semibold text-muted-foreground uppercase"
+                >
+                  Snapshot / run
+                </label>
+                <select
+                  id="snapshot"
+                  className="w-full mt-1 border border-border rounded px-2 py-1 bg-background text-sm focus-visible:ring-2 focus-visible:ring-ring"
+                  value={snapshot}
+                  onChange={(event) => setSnapshot(event.target.value)}
+                >
+                  <option value="latest">Latest available run</option>
+                  {runOptions.map((option) => (
+                    <option key={option.initTime} value={option.initTime}>
+                      {option.initTime.replace("T", " ").replace("Z", "")}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </CardContent>
+          </Card>
         </aside>
 
-        {/* Main panel */}
-        <main className="flex-1 p-4 space-y-4">
-          <div>
-            {loading && <div className="text-sm text-muted-foreground mb-2">Fetching…</div>}
-          <div className="text-lg font-semibold">{stats ? `Models agree within ${(varMeta.scale * 0.3).toFixed(1)}${varMeta.unit} through ${stats.agreeUntil < 24 ? "the next " + stats.agreeUntil + "h" : Math.round(stats.agreeUntil / 24) + "d"}, then split by up to ${stats.maxSplit.toFixed(1)}${varMeta.unit}.` : "Waiting on the models…"}</div>
-            <div className="flex items-center gap-3 mt-2">
-              <span className="text-sm">{stats ? stats.label + " confidence" : "—"}</span>
-              <div className="flex-1 h-2 bg-muted rounded overflow-hidden">
-                <div className="h-full bg-primary transition-all" style={{ width: (stats?.score || 0) + "%" }} />
-              </div>
-              <span className="font-mono text-sm">{stats ? stats.score + "/100" : "—"}</span>
+        <main className="min-w-0 space-y-4">
+          {error && (
+            <div
+              role="alert"
+              className="rounded border border-destructive/30 bg-destructive/10 text-destructive text-sm px-3 py-2"
+            >
+              {error}
             </div>
-            <div className="text-xs text-muted-foreground mt-1">Rule: 100 × (1 − (normalized ensemble spread + normalized inter-model deviation)/2), normalized by median per-timestamp range.</div>
-            {notice && <div className="text-xs text-amber-400 mt-1">{notice}</div>}
-          </div>
-
-          {data?.results?.some((r: any) => r.status === "error") && (
-            <div className="flex flex-wrap gap-2">
-              {(data.results || []).filter((r: any) => r.status === "error").map((r: any) => (
-                <Badge key={r.product} variant="destructive" className="text-xs">
-                  {modelLabel(r.dataProduct?.id || r.product)}: {r.error?.slice(0, 80) || "failed"}
-                </Badge>
-              ))}
+          )}
+          {notice && (
+            <div
+              role="status"
+              className="rounded border border-border bg-muted/50 text-xs px-3 py-2"
+            >
+              {notice}
             </div>
           )}
 
-          <div className="flex gap-1 border-b border-border">
-            {(["fan", "spaghetti", "agreement", "table"] as const).map((t) => (
-              <button key={t} className={`px-3 py-1.5 text-sm border-b-2 ${tab === t ? "border-primary text-foreground" : "border-transparent text-muted-foreground"}`} onClick={() => setTab(t)}>
-                {t === "fan" ? "Fan chart" : t === "spaghetti" ? "Spaghetti" : t === "agreement" ? "Agreement strip" : "Table view"}
-              </button>
-            ))}
-          </div>
-
           <Card>
-            <CardContent className="p-3">
-              {tab === "agreement" ? (
-                <div className="overflow-auto">
-                  <div className="grid text-xs" style={{ gridTemplateColumns: `120px repeat(${Math.ceil((stats?.leads.length || 0) / 6)}, 1fr)` }}>
-                    <div />
-                    {(stats?.leads || []).filter((_: any, i: number) => i % 6 === 0).map((t: string) => (
-                      <div key={t} className="text-center text-muted-foreground font-mono">{t.slice(0,10)} {t.slice(11,16)}</div>
-                    ))}
-                    {results.filter((r: any) => (r._times || []).length).map((r: any) => (
-                      <>
-                        <div key={r.dataProduct.id + "-name"} className="truncate">{modelLabel(r.dataProduct.id)}</div>
-                        {(stats?.leads || []).filter((_: any, i: number) => i % 6 === 0).map((t: string) => {
-                          const idx = (r._times || []).indexOf(t);
-                          const v = idx >= 0 ? modelValueAt(r, variable, idx) : null;
-                          const med = stats?.multiMedian?.[stats.leads.indexOf(t)];
-                          const dev = (typeof v === "number" && typeof med === "number") ? Math.abs(v - med) : 0;
-                          const tt = Math.min(1, dev / varMeta.scale);
-                          const light = 30 + tt * 40;
-                          return <div key={r.dataProduct.id + "-" + t} style={{ background: `hsl(${Math.round(30 + (1 - tt) * 30)},70%,${light}%)`, height: 18, borderRadius: 2 }} title={`${modelLabel(r.dataProduct.id)} ${t.slice(11,16)}: ${typeof v === "number" ? v.toFixed(2) : "—"}`} />;
-                        })}
-                      </>
-                    ))}
+            <CardContent className="p-4 space-y-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                {ensembleMemberCount > 0 && (
+                  <span className="text-xs text-muted-foreground">
+                    {ensembleMemberCount} ensemble members pooled
+                  </span>
+                )}
+                {loading && (
+                  <span className="text-xs text-muted-foreground" role="status">
+                    Fetching…
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-start gap-4 flex-wrap">
+                <div className="min-w-[110px]">
+                  <div className="text-xs text-muted-foreground">Confidence</div>
+                  <div className="text-3xl font-bold tabular-nums">
+                    {stats ? stats.score : "—"}
+                    <span className="text-sm text-muted-foreground">/100</span>
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {stats ? stats.label : "select models"}
                   </div>
                 </div>
-              ) : tab === "table" ? (
-                <div className="overflow-auto max-h-[60vh]">
-                  <table className="w-full text-xs">
-                    <thead>
-                      <tr>
-                        <th className="text-left p-1">Lead</th>
-                        {results.map((r: any) => <th key={r.dataProduct.id} className="text-left p-1">{r.dataProduct.id}</th>)}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(stats?.leads || []).map((t: string) => (
-                        <tr key={t} className="border-t border-border">
-                          <td className="p-1 font-mono">{t.slice(0,10)} {t.slice(11,16)}</td>
-                          {results.map((r: any) => {
-                            const idx = (r._times || []).indexOf(t);
-                            const v = idx >= 0 ? modelValueAt(r, variable, idx) : null;
-                            return <td key={r.dataProduct.id} className="p-1 font-mono">{typeof v === "number" ? v.toFixed(2) : "—"}</td>;
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+
+                <div className="flex-1 min-w-[240px] text-sm">
+                  {stats ? (
+                    <>
+                      <div className="text-sm text-muted-foreground mb-1">
+                        Models agree within{" "}
+                        <span className="text-foreground font-semibold">
+                          {stats.thr.toFixed(1)}
+                        </span>{" "}
+                        {varMeta.unit} of each other through{" "}
+                        <span className="text-foreground font-semibold">
+                          {stats.agreeUntil >= 24
+                            ? `${Math.round(stats.agreeUntil / 24)}d`
+                            : `${stats.agreeUntil}h`}
+                        </span>
+                        {stats.maxSplit > 0 ? (
+                          <>
+                            {" "}
+                            then split by up to{" "}
+                            <span className="text-foreground font-semibold">
+                              {stats.maxSplit.toFixed(1)}
+                            </span>{" "}
+                            {varMeta.unit}
+                          </>
+                        ) : null}
+                        .
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        Ensemble spread + inter-model deviation vs. a {varMeta.unit} threshold. No
+                        one model is marked right or wrong — they&apos;re all forecasts.
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-sm text-muted-foreground">
+                      Select a location and at least one model to see how much the forecasts
+                      disagree.
+                    </div>
+                  )}
                 </div>
-              ) : (
-                <div className="h-[60vh] min-h-[360px]">
-                  <ChartContainer config={{}} className="h-full">
-                    <LineChart data={chartData}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="time" fontSize={10} />
-                      <YAxis fontSize={10} />
-                      <ChartTooltip content={<ChartTooltipContent />} />
-                      <Legend />
-                      {tab === "fan" && chartData.some((d: any) => d._p90High != null) && (
-                        <>
-                          <Area type="monotone" dataKey={["_p90Low", "_p90High"] as any} stroke="none" fill="#4fd1c5" fillOpacity={0.08} name="90% band" />
-                          <Area type="monotone" dataKey={["_p50Low", "_p50High"] as any} stroke="none" fill="#4fd1c5" fillOpacity={0.18} name="50% band" />
-                          <Line type="monotone" dataKey="_ensMedian" stroke="#4fd1c5" strokeWidth={2.5} dot={false} connectNulls name="Ensemble median" />
-                        </>
-                      )}
-                      {results.map((r: any) => (
-                        <Line key={r.dataProduct.id} type="monotone" dataKey={r.dataProduct.id} stroke={MODELS.find((m) => m.id === r.dataProduct.id)?.color || COLORS[0]} strokeWidth={2} dot={false} connectNulls strokeDasharray={MODELS.find((m) => m.id === r.dataProduct.id)?.dash.join(" ")} name={modelLabel(r.dataProduct.id)} />
-                      ))}
-                      {tab === "spaghetti" && results.filter(isEnsemble).map((r: any) =>
-                        (r._ensemble || []).map((_: any, mi: number) => (
-                          <Line key={`${r.dataProduct.id}_m${mi}`} type="monotone" dataKey={`${r.dataProduct.id}_m${mi}`} stroke={MODELS.find((m) => m.id === r.dataProduct.id)?.color || "#999"} strokeWidth={0.8} strokeOpacity={0.25} dot={false} connectNulls legendType="none" />
-                        ))
-                      )}
-                    </LineChart>
-                  </ChartContainer>
+              </div>
+
+              {errorResults.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {errorResults.map((result) => (
+                    <span
+                      key={result.dataProduct.id}
+                      className="text-xs px-2 py-0.5 rounded bg-destructive/10 text-destructive"
+                    >
+                      {modelLabel(result.dataProduct.id)}: {result.error || "unavailable"}
+                    </span>
+                  ))}
                 </div>
               )}
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <Card>
+                  <CardContent className="p-3 text-sm">
+                    <div className="text-xs text-muted-foreground">Biggest disagreement</div>
+                    {stats && stats.bigA && stats.bigB ? (
+                      <>
+                        {modelLabel(stats.bigA)} vs {modelLabel(stats.bigB)} at {stats.bigH ?? 0}h —{" "}
+                        {stats.bigVal !== null ? stats.bigVal.toFixed(2) : "—"} {varMeta.unit}
+                      </>
+                    ) : (
+                      "—"
+                    )}
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardContent className="p-3 text-sm">
+                    <div className="text-xs text-muted-foreground">Spread at 24h / 72h / 7d</div>
+                    {spreadSummary}
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardContent className="p-3 text-sm">
+                    <div className="text-xs text-muted-foreground">Run age</div>
+                    {runAgeSummary}
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card>
+                <CardContent className="p-3">
+                  <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
+                    <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                      Time series
+                    </div>
+                    <div
+                      className="flex items-center gap-1 border border-border rounded p-0.5"
+                      role="tablist"
+                      aria-label="Chart view"
+                    >
+                      {TAB_ORDER.map((entry, index) => (
+                        <button
+                          key={entry}
+                          id={`tab-${entry}`}
+                          type="button"
+                          role="tab"
+                          aria-selected={tab === entry}
+                          aria-controls={`panel-${entry}`}
+                          tabIndex={tab === entry ? 0 : -1}
+                          onClick={() => setTab(entry)}
+                          onKeyDown={(event) => onTabKeyDown(event, index)}
+                          className={`text-xs px-2 py-1 rounded focus-visible:ring-2 focus-visible:ring-ring ${
+                            tab === entry
+                              ? "bg-primary text-primary-foreground"
+                              : "hover:bg-accent/10"
+                          }`}
+                        >
+                          {entry === "fan"
+                            ? "Fan chart"
+                            : entry === "spaghetti"
+                              ? "Spaghetti"
+                              : entry === "agreement"
+                                ? "Agreement strip"
+                                : "Table view"}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div
+                    id={`panel-${tab}`}
+                    role="tabpanel"
+                    aria-labelledby={`tab-${tab}`}
+                    tabIndex={0}
+                    className="focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {tab === "fan" ? (
+                      <ChartContainer
+                        config={{}}
+                        className="h-[360px] w-full"
+                        role="img"
+                        aria-label={`${varMeta.label} forecast fan chart`}
+                      >
+                        <ComposedChart data={chartData}>
+                          <CartesianGrid vertical={false} />
+                          <XAxis
+                            dataKey="time"
+                            tickLine={false}
+                            axisLine={false}
+                            tickMargin={8}
+                            interval="preserveStartEnd"
+                            minTickGap={40}
+                          />
+                          <YAxis
+                            tickLine={false}
+                            axisLine={false}
+                            width={48}
+                            tickFormatter={(value: number) =>
+                              Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(1)
+                            }
+                          />
+                          <Area
+                            type="monotone"
+                            dataKey={["_p90Low", "_p90High"] as unknown as string}
+                            stroke="none"
+                            fill="#4fd1c5"
+                            fillOpacity={0.08}
+                            isAnimationActive={false}
+                          />
+                          <Area
+                            type="monotone"
+                            dataKey={["_p50Low", "_p50High"] as unknown as string}
+                            stroke="none"
+                            fill="#4fd1c5"
+                            fillOpacity={0.18}
+                            isAnimationActive={false}
+                          />
+                          {results.map((result) => {
+                            const id = result.dataProduct.id;
+                            const model = MODELS.find((entry) => entry.id === id);
+                            if (result._ensemble) {
+                              return (
+                                <Line
+                                  key={id}
+                                  type="monotone"
+                                  dataKey={id}
+                                  stroke={COLORS[id] || "#fff"}
+                                  strokeWidth={2}
+                                  strokeDasharray={model?.dash?.join(" ")}
+                                  dot={false}
+                                  isAnimationActive={false}
+                                  connectNulls
+                                />
+                              );
+                            }
+                            return (
+                              <Line
+                                key={id}
+                                type="monotone"
+                                dataKey={id}
+                                stroke={COLORS[id] || "#fff"}
+                                strokeWidth={id === primaryModel ? 2.6 : 1.5}
+                                strokeDasharray={model?.dash?.join(" ")}
+                                dot={false}
+                                isAnimationActive={false}
+                                connectNulls
+                              />
+                            );
+                          })}
+                          <Line
+                            type="monotone"
+                            dataKey="_ensMedian"
+                            stroke="#4fd1c5"
+                            strokeWidth={2.5}
+                            dot={false}
+                            connectNulls
+                            isAnimationActive={false}
+                            name="Ensemble median"
+                          />
+                          {results
+                            .filter((result) => result._ensemble)
+                            .flatMap((result) => {
+                              const id = result.dataProduct.id;
+                              return [
+                                <Line
+                                  key={`${id}_min`}
+                                  type="monotone"
+                                  dataKey={`${id}_min`}
+                                  stroke={COLORS[id] || "#fff"}
+                                  strokeWidth={0}
+                                  dot={false}
+                                  isAnimationActive={false}
+                                />,
+                                <Line
+                                  key={`${id}_max`}
+                                  type="monotone"
+                                  dataKey={`${id}_max`}
+                                  stroke={COLORS[id] || "#fff"}
+                                  strokeWidth={0}
+                                  dot={false}
+                                  isAnimationActive={false}
+                                />,
+                              ];
+                            })}
+                        </ComposedChart>
+                      </ChartContainer>
+                    ) : tab === "spaghetti" ? (
+                      <ChartContainer
+                        config={{}}
+                        className="h-[360px] w-full"
+                        role="img"
+                        aria-label={`${varMeta.label} ensemble spaghetti chart`}
+                      >
+                        <ComposedChart data={chartData}>
+                          <CartesianGrid vertical={false} />
+                          <XAxis
+                            dataKey="time"
+                            tickLine={false}
+                            axisLine={false}
+                            tickMargin={8}
+                            interval="preserveStartEnd"
+                            minTickGap={40}
+                          />
+                          <YAxis
+                            tickLine={false}
+                            axisLine={false}
+                            width={48}
+                            tickFormatter={(value: number) => value.toFixed(1)}
+                          />
+                          {results.map((result) => {
+                            const id = result.dataProduct.id;
+                            if (result._ensemble) {
+                              return (result._ensemble || []).map((member, memberIndex) => (
+                                <Line
+                                  key={`${id}_m${memberIndex}`}
+                                  type="monotone"
+                                  dataKey={`${id}_m${memberIndex}`}
+                                  stroke={COLORS[id] || "#fff"}
+                                  strokeOpacity={0.18}
+                                  strokeWidth={1}
+                                  dot={false}
+                                  isAnimationActive={false}
+                                  legendType="none"
+                                />
+                              ));
+                            }
+                            return (
+                              <Line
+                                key={id}
+                                type="monotone"
+                                dataKey={id}
+                                stroke={COLORS[id] || "#fff"}
+                                strokeWidth={1.8}
+                                dot={false}
+                                isAnimationActive={false}
+                              />
+                            );
+                          })}
+                          {results.some((result) => result._ensemble) && (
+                            <Line
+                              type="monotone"
+                              dataKey="_ensMedian"
+                              stroke="#4fd1c5"
+                              strokeWidth={2.5}
+                              dot={false}
+                              connectNulls
+                              isAnimationActive={false}
+                              name="Ensemble median"
+                            />
+                          )}
+                        </ComposedChart>
+                      </ChartContainer>
+                    ) : tab === "agreement" ? (
+                      <div className="overflow-auto">
+                        <div
+                          className="grid text-xs"
+                          style={{
+                            gridTemplateColumns: `120px repeat(${Math.ceil((stats?.leads.length || 0) / 6)}, 1fr)`,
+                          }}
+                        >
+                          <div />
+                          {(stats?.leads || [])
+                            .filter((_, index) => index % 6 === 0)
+                            .map((time) => (
+                              <div
+                                key={time}
+                                className="text-center text-muted-foreground font-mono"
+                              >
+                                {time.slice(0, 10)} {time.slice(11, 16)}
+                              </div>
+                            ))}
+                          {results
+                            .filter((result) => (result._times || []).length)
+                            .map((result) => (
+                              <Fragment key={result.dataProduct.id}>
+                                <div className="truncate">{modelLabel(result.dataProduct.id)}</div>
+                                {(stats?.leads || [])
+                                  .filter((_, index) => index % 6 === 0)
+                                  .map((time) => {
+                                    const value = valueAtTime(result, variable, time);
+                                    const median = stats?.multiMedian?.[stats.leads.indexOf(time)];
+                                    const deviation =
+                                      typeof value === "number" && typeof median === "number"
+                                        ? Math.abs(value - median)
+                                        : 0;
+                                    const ratio = Math.min(1, deviation / varMeta.scale);
+                                    const light = 30 + ratio * 40;
+                                    return (
+                                      <div
+                                        key={`${result.dataProduct.id}-${time}`}
+                                        style={{
+                                          background: `hsl(${Math.round(30 + (1 - ratio) * 30)},70%,${light}%)`,
+                                          height: 18,
+                                          borderRadius: 2,
+                                        }}
+                                        title={`${modelLabel(result.dataProduct.id)} ${time.slice(11, 16)}: ${
+                                          typeof value === "number" ? value.toFixed(2) : "—"
+                                        }`}
+                                      />
+                                    );
+                                  })}
+                              </Fragment>
+                            ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="overflow-auto max-h-[60vh]">
+                        <table className="w-full text-xs">
+                          <thead className="sticky top-0 bg-card">
+                            <tr className="text-left text-muted-foreground">
+                              <th className="py-1 pr-2 font-medium">Time</th>
+                              {results.map((result) => (
+                                <th key={result.dataProduct.id} className="py-1 px-2 font-medium">
+                                  {modelLabel(result.dataProduct.id)}
+                                </th>
+                              ))}
+                              <th className="py-1 px-2 font-medium">Median</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(stats?.leads || []).map((time, index) => {
+                              const median = stats?.multiMedian?.[index] ?? null;
+                              return (
+                                <tr key={time} className="border-t border-border/60">
+                                  <td className="py-1 pr-2 font-mono">
+                                    {time.slice(0, 16).replace("T", " ")}
+                                  </td>
+                                  {results.map((result) => {
+                                    const value = valueAtTime(result, variable, time);
+                                    return (
+                                      <td
+                                        key={result.dataProduct.id}
+                                        className="py-1 px-2 tabular-nums"
+                                      >
+                                        {typeof value === "number" ? value.toFixed(2) : "—"}
+                                      </td>
+                                    );
+                                  })}
+                                  <td className="py-1 px-2 tabular-nums font-medium">
+                                    {typeof median === "number" ? median.toFixed(2) : "—"}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  {tab === "fan" && (
+                    <div className="text-xs text-muted-foreground mt-2">
+                      Fan chart: median line, 50% and 90% ensemble bands. Wider band = less
+                      agreement.
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
             </CardContent>
           </Card>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-            <Card><CardContent className="p-3 text-sm"><div className="text-xs text-muted-foreground">Biggest disagreement</div>{stats ? `${modelLabel(stats.bigA)} vs ${modelLabel(stats.bigB)} at ${stats.bigH}h — ${stats.bigVal.toFixed(2)} ${varMeta.unit}` : "—"}</CardContent></Card>
-            <Card><CardContent className="p-3 text-sm"><div className="text-xs text-muted-foreground">Spread at 24h / 72h / 7d</div>{stats ? `${stats.spreadAt(24)} / ${stats.spreadAt(72)} / ${stats.spreadAt(168)} ${varMeta.unit}` : "—"}</CardContent></Card>
-            <Card><CardContent className="p-3 text-sm"><div className="text-xs text-muted-foreground">Run age</div>{stats ? results.map((r: any) => r.forecasts?.[0]?.initTime || r.analysisTimes?.[0] || "n/a").join(", ") : "—"}</CardContent></Card>
+          <div className="flex flex-wrap gap-2 items-center">
+            <Button variant="secondary" size="sm" onClick={downloadCsv}>
+              Download CSV
+            </Button>
+            <Button variant="secondary" size="sm" onClick={copyJson}>
+              Copy as JSON
+            </Button>
+            <Button variant="secondary" size="sm" onClick={copyLink}>
+              Copy shareable link
+            </Button>
+            {copyStatus && (
+              <span className="text-xs text-muted-foreground" role="status">
+                {copyStatus}
+              </span>
+            )}
           </div>
 
-          <div className="flex flex-wrap gap-2">
-            <Button variant="secondary" size="sm" onClick={exportCsv}>Download CSV</Button>
-            <Button variant="secondary" size="sm" onClick={copyJson}>Copy as JSON</Button>
-            <Button variant="secondary" size="sm" onClick={copyLink}>Copy shareable link</Button>
-          </div>
+          {!loading && !data && !error && (
+            <div className="text-sm text-muted-foreground" role="status">
+              Select a location and at least one model to see a forecast.
+            </div>
+          )}
+          {!loading && data && results.length === 0 && (
+            <div className="text-sm text-muted-foreground" role="status">
+              No model data returned. Try another location, run, or model.
+            </div>
+          )}
         </main>
       </div>
 
+      <footer className="border-t border-border mt-6">
+        <div className="max-w-7xl mx-auto px-4 py-4 text-xs text-muted-foreground flex flex-wrap gap-x-3 gap-y-1">
+          <span>
+            Data: NOAA GFS/HRRR/GEFS, ECMWF AIFS/IFS ENS, DWD ICON-EU via{" "}
+            <a
+              href="https://dynamical.org/catalog"
+              target="_blank"
+              rel="noreferrer"
+              className="underline"
+            >
+              Dynamical
+            </a>
+            .
+          </span>
+          <span>Licenses vary by model; see the catalog.</span>
+          <button
+            type="button"
+            className="underline focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={() => setShowHowTo(true)}
+          >
+            Attribution &amp; method
+          </button>
+        </div>
+      </footer>
+
       {showHowTo && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowHowTo(false)}>
-          <Card className="max-w-lg m-4" onClick={(e) => e.stopPropagation()}>
-            <CardHeader><CardTitle>How to read this</CardTitle></CardHeader>
-            <CardContent className="space-y-3 text-sm">
-              <div><strong>What a fan chart is</strong><p className="text-muted-foreground">An ensemble forecast shown as a median line with shaded 50% and 90% bands. Wider fan = less self-agreement.</p></div>
-              <div><strong>What &quot;agreement&quot; means</strong><p className="text-muted-foreground">Two measures: ensemble spread and inter-model deviation. Both must be small for high confidence.</p></div>
-              <div><strong>Why a narrow band isn&apos;t the same as being right</strong><p className="text-muted-foreground">A tight ensemble can share a bias. Narrow means precise, not correct. Compare against the analysis line.</p></div>
-              <Button size="sm" onClick={() => setShowHowTo(false)}>Close</Button>
-            </CardContent>
-          </Card>
+        <div
+          className="fixed inset-0 z-50 bg-black/60 p-4 grid place-items-center"
+          onClick={closeModal}
+        >
+          <div
+            ref={modalRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="howto-title"
+            className="max-w-lg w-full"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <Card>
+              <CardContent className="p-5 space-y-3 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <h2 id="howto-title" className="text-base font-semibold">
+                    How to read this
+                  </h2>
+                  <Button variant="ghost" size="sm" onClick={closeModal}>
+                    Close
+                  </Button>
+                </div>
+                <div>
+                  <strong>What a fan chart is</strong>
+                  <p className="text-muted-foreground">
+                    An ensemble forecast shown as a median line with shaded 50% and 90% bands. Wider
+                    fan = less self-agreement.
+                  </p>
+                </div>
+                <div>
+                  <strong>What &quot;agreement&quot; means</strong>
+                  <p className="text-muted-foreground">
+                    Two measures: ensemble spread and inter-model deviation. Both must be small for
+                    high confidence.
+                  </p>
+                </div>
+                <div>
+                  <strong>What it is not</strong>
+                  <p className="text-muted-foreground">
+                    It is not a probability of rain or a guarantee. It is a measure of how much the
+                    models disagree with each other. Every model can be wrong in the same direction.
+                  </p>
+                </div>
+                <div className="text-xs text-muted-foreground border-t border-border pt-2">
+                  Data: NOAA GFS/HRRR/GEFS, ECMWF AIFS/IFS ENS, DWD ICON-EU via{" "}
+                  <a
+                    href="https://dynamical.org/catalog"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline"
+                  >
+                    Dynamical
+                  </a>
+                  . Model licenses and attribution are listed in the catalog. Forecast data is for
+                  exploration, not safety-critical decisions.
+                </div>
+              </CardContent>
+            </Card>
+          </div>
         </div>
       )}
     </div>

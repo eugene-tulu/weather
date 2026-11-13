@@ -1,36 +1,54 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Disagreement frontend
 
-## Getting Started
+Next.js 16 / React 19 / Recharts client for the Disagreement weather app.
 
-First, run the development server:
+## Setup
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000`. For local development against a separately running backend, set `NEXT_PUBLIC_API_BASE=http://localhost:8000` in `frontend/.env.local` (ignored by git). In Docker, leave it empty so the browser calls the same-origin `/api` path proxied by Caddy.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Scripts
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Start the development server. |
+| `npm run build` | Production build (standalone output). |
+| `npm start` | Start the production server. |
+| `npm run lint` | ESLint. |
+| `npm run typecheck` | `tsc --noEmit`. |
+| `npm test` | Vitest. |
+| `npm run test:watch` | Vitest watch mode. |
 
-## Learn More
+## Structure
 
-To learn more about Next.js, take a look at the following resources:
+- `src/app/page.tsx` — page shell, state, URL sync, data fetching, charts, and tables.
+- `src/lib/types.ts` — API and view types.
+- `src/lib/models.ts` — model and variable metadata.
+- `src/lib/normalize.ts` — API result normalization.
+- `src/lib/forecast.ts` — chart alignment, statistics, CSV export.
+- `src/lib/api.ts` — fetch helpers with timeout and abort handling.
+- `src/lib/stats.ts` — median, percentile, standard deviation, confidence primitives.
+- `tests/` — Vitest unit tests.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Chart alignment
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Ensemble members are aligned by each model's own `validTimes` array, not by a shared union index. This matters when hourly and 3-hourly models are shown together. Ensemble lines and the table use the median consistently.
 
-## Deploy on Vercel
+## Accessibility
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- The page has a single `<h1>`.
+- Tabs expose `role="tablist"`, `role="tab"`, `aria-selected`, and arrow-key navigation.
+- The modal and mobile control rail trap focus and close on Escape.
+- The search field exposes combobox/listbox semantics.
+- Loading, error, notice, and copy status use live regions.
+- The table view is the text alternative to the chart.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Notes
+
+- `npm audit` is clean for production dependencies; dev/build advisories should be reviewed before release.
+- The Docker build uses `output: "standalone"` and copies only the standalone server, static assets, and the non-root runtime user.
+- The app does not require an account or API key; it uses the public Dynamical API and Open-Meteo geocoding. Attribution is in the footer and `ATTRIBUTION.md` at the repository root.
