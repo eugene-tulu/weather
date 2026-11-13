@@ -1,0 +1,140 @@
+services:
+  backend-init:
+    image: busybox:1.36
+    user: "0:0"
+    volumes:
+      - backend_data:/data
+    command: ["sh", "-c", "chown -R 10001:10001 /data && chmod 700 /data"]
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
+  backend:
+    build: ./backend
+    depends_on:
+      backend-init:
+        condition: service_completed_successfully
+    expose:
+      - "8000"
+    environment:
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://localhost:3000}"
+      CACHE_DB_PATH: /data/cache.duckdb
+      CACHE_TTL_SECONDS: "${CACHE_TTL_SECONDS:-600}"
+      CACHE_MAX_ROWS: "${CACHE_MAX_ROWS:-10000}"
+      RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-120}"
+      OUTBOUND_RATE_PER_10S: "${OUTBOUND_RATE_PER_10S:-20}"
+      OUTBOUND_RATE_PER_60S: "${OUTBOUND_RATE_PER_60S:-250}"
+      ENVIRONMENT: production
+    volumes:
+      - backend_data:/data
+    networks:
+      - weather
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_BASE: ""
+    expose:
+      - "3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - weather
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "--spider",
+          "http://127.0.0.1:3000/",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: "${DOMAIN:-localhost}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    networks:
+      - weather
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "-q",
+          "-O",
+          "/dev/null",
+          "http://127.0.0.1:2019/config/",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  weather:
+    driver: bridge
+
+volumes:
+  backend_data:
+  caddy_data:
+  caddy_config:

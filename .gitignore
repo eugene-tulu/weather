@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Data
+*.duckdb
+*.duckdb.wal
+
+# Local plan artifacts
+.kilo/plans/
+
+# OS
+.DS_Store
