@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
+
+import redis.asyncio as redis
+
+logger = logging.getLogger("weather.rate_limit")
 
 
 class InMemoryRateLimiter:
@@ -165,3 +170,54 @@ class CircuitBreaker:
         if self._state == "half-open" or self._failures >= self.failure_threshold:
             self._state = "open"
             self._opened_at = self._time()
+
+
+class RedisRateLimiter:
+    """Shared sliding-window limiter for multi-instance deployments."""
+
+    _SCRIPT = """
+    local key = KEYS[1]
+    local now = tonumber(ARGV[1])
+    local window = tonumber(ARGV[2])
+    local limit = tonumber(ARGV[3])
+    redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+    local count = redis.call('ZCARD', key)
+    if count >= limit then
+        local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+        local retry = window - (now - tonumber(oldest[2]))
+        return {0, math.max(0, retry)}
+    end
+    redis.call('ZADD', key, now, ARGV[4])
+    redis.call('EXPIRE', key, math.ceil(window) + 1)
+    return {1, 0}
+    """
+
+    def __init__(
+        self,
+        url: str,
+        limit: int,
+        window_seconds: float = 60.0,
+        prefix: str = "weather:rl",
+    ) -> None:
+        self.limit = limit
+        self.window = window_seconds
+        self.prefix = prefix
+        self._client = redis.from_url(url, decode_responses=True)
+
+    async def check(self, key: str) -> float | None:
+        try:
+            allowed, retry = await self._client.eval(
+                self._SCRIPT,
+                1,
+                f"{self.prefix}:{key}",
+                time.time(),
+                self.window,
+                self.limit,
+                f"{time.time()}-{id(key)}",
+            )
+            if int(allowed) == 1:
+                return None
+            return max(0.0, float(retry))
+        except Exception:
+            logger.exception("Redis rate limiter failed; allowing request")
+            return None

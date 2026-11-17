@@ -17,7 +17,7 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 COPY --from=deps /app/.venv ./.venv
-COPY app.py cache.py config.py main.py metrics.py rate_limit.py schemas.py upstream.py ./
+COPY app.py admin.py auth.py cache.py calibration.py config.py decision.py forecast_service.py main.py mcp_server.py metrics.py observability.py rate_limit.py schemas.py store.py upstream.py v1.py ./
 
 RUN mkdir -p /data \
     && groupadd --gid 10001 app \

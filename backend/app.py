@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -16,17 +17,29 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from admin import register_admin
 from cache import Cache
 from config import Settings, get_settings
+from decision import DecisionEngine
+from forecast_service import ForecastService
 from metrics import Metrics
-from rate_limit import CircuitBreaker, InMemoryRateLimiter, OutboundTokenBucket
+from observability import instrument_app
+from rate_limit import (
+    CircuitBreaker,
+    InMemoryRateLimiter,
+    OutboundTokenBucket,
+    RedisRateLimiter,
+)
 from schemas import (
     ALL_PRODUCTS,
     FORECAST_PRODUCTS,
+    MAP_PRODUCT_IDS,
     AnalysisQuery,
     PointQuery,
 )
+from store import Store
 from upstream import UpstreamClient, UpstreamError, http_from_upstream
+from v1 import router as v1_router
 
 
 class JsonFormatter(logging.Formatter):
@@ -188,6 +201,8 @@ class RateLimitMiddleware:
 
         key = client_key(scope, self.trust_proxy_headers)
         retry_after = self.limiter.check(key)
+        if inspect.isawaitable(retry_after):
+            retry_after = await retry_after
         if retry_after is not None:
             self.metrics.inc("rate_limited")
             body = json.dumps({"detail": "rate limit exceeded"}).encode()
@@ -210,11 +225,77 @@ class RateLimitMiddleware:
         await self.app(scope, receive, send)
 
 
+def _map_options(product_id: str, collection: dict[str, Any]) -> dict[str, Any]:
+    assets = collection.get("assets") or {}
+    asset = assets.get("icechunk-https") or assets.get("icechunk") or {}
+    href = asset.get("href")
+    if not href:
+        raise UpstreamError(502, "map product has no Icechunk asset")
+
+    if href.startswith("s3://"):
+        bucket, _, key = href[5:].partition("/")
+        storage = asset.get("xarray:storage_options") or {}
+        client = storage.get("client_kwargs") or {}
+        region = client.get("region_name", "us-west-2")
+        href = f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
+
+    raw_variables = collection.get("cube:variables") or {}
+    variables: list[dict[str, Any]] = []
+    for name, meta in raw_variables.items():
+        dims = meta.get("dimensions") or meta.get("dims") or []
+        if not isinstance(dims, list):
+            continue
+        if any(dim in dims for dim in ("pressure_level", "height_above_mean_sea_level")):
+            continue
+        if not ("time" in dims or ("init_time" in dims and "lead_time" in dims)):
+            continue
+        variables.append(
+            {
+                "path": name,
+                "name": name,
+                "long_name": meta.get("long_name") or name,
+                "units": meta.get("unit") or meta.get("units") or "",
+                "dims": dims,
+            }
+        )
+
+    if not variables:
+        raise UpstreamError(502, "map product has no surface variables")
+
+    variables.sort(key=lambda variable: variable["name"])
+    default = (
+        "temperature_2m"
+        if any(variable["name"] == "temperature_2m" for variable in variables)
+        else variables[0]["name"]
+    )
+
+    bbox = ((collection.get("extent") or {}).get("spatial") or {}).get("bbox") or [
+        [-180, -90, 180, 90]
+    ]
+    bounds = bbox[0]
+    if len(bounds) == 4 and bounds[0] <= -170 and bounds[2] >= 170:
+        bounds = [-180, -60, 180, 75]
+
+    return {
+        "id": product_id,
+        "href": href,
+        "variables": variables,
+        "defaultVariable": default,
+        "initialView": {"bounds": bounds},
+        "proj4": None,
+        "virtual": True,
+    }
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging()
     settings = settings or get_settings()
     metrics = Metrics()
-    limiter = InMemoryRateLimiter(settings.rate_limit_per_minute)
+    limiter = (
+        RedisRateLimiter(settings.redis_url, settings.rate_limit_per_minute)
+        if settings.redis_url
+        else InMemoryRateLimiter(settings.rate_limit_per_minute)
+    )
     outbound = OutboundTokenBucket(
         settings.outbound_per_10s,
         settings.outbound_per_60s,
@@ -227,6 +308,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        store = Store(settings.database_url)
+        await store.init()
+        await store.ping()
+
         cache = Cache(
             settings.cache_db_path,
             settings.cache_ttl_seconds,
@@ -236,9 +321,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         upstream = UpstreamClient(settings, outbound, breaker, metrics)
         await upstream.start()
+        forecast = ForecastService(cache, upstream)
+        decision = DecisionEngine(forecast, store, products=settings.decision_products)
 
+        app.state.store = store
         app.state.cache = cache
         app.state.upstream = upstream
+        app.state.forecast = forecast
+        app.state.decision = decision
         app.state.metrics = metrics
         app.state.settings = settings
         app.state.breaker = breaker
@@ -262,6 +352,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 pass
             await upstream.stop()
             cache.close()
+            await store.close()
 
     app = FastAPI(title="Weather Leverage API", lifespan=lifespan)
     app.state.metrics = metrics
@@ -286,6 +377,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=False,
         max_age=600,
     )
+    instrument_app(app, settings)
+    app.include_router(v1_router)
+    register_admin(app)
 
     @app.get("/health/live")
     async def live() -> dict[str, str]:
@@ -294,11 +388,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health/ready")
     async def ready(request: Request) -> dict[str, str]:
         cache: Cache = request.app.state.cache
+        store: Store = request.app.state.store
         try:
             await cache.ping()
+            await store.ping()
         except Exception as exc:
-            raise HTTPException(503, "cache unavailable") from exc
-        return {"status": "ok", "cache": "ok"}
+            raise HTTPException(503, "cache or database unavailable") from exc
+        return {"status": "ok", "cache": "ok", "database": "ok"}
 
     @app.get("/metrics")
     async def metrics_route(request: Request) -> dict[str, Any]:
@@ -376,116 +472,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise http_from_upstream(exc) from exc
         return data
 
-    @app.post("/api/point")
-    async def point(request: Request, q: PointQuery) -> dict[str, Any]:
+    @app.get("/api/map-product/{product_id}")
+    async def map_product(
+        request: Request,
+        product_id: str = Path(pattern=r"^[a-z0-9][a-z0-9-]{0,127}$"),
+    ) -> Any:
+        if product_id not in MAP_PRODUCT_IDS:
+            raise HTTPException(404, "unknown map product")
         cache: Cache = request.app.state.cache
         upstream: UpstreamClient = request.app.state.upstream
 
-        payload_base: dict[str, Any] = {
-            "location": {
-                "latitude": q.latitude,
-                "longitude": q.longitude,
-            },
-            "variables": q.variables,
-            "maxLeadTimeHours": q.maxLeadTimeHours,
-        }
-        if q.initTime is not None:
-            payload_base["initTime"] = q.initTime.isoformat()
-
-        async def fetch_one(product_id: str) -> dict[str, Any]:
-            key = "point:" + json.dumps(
-                {
-                    "lat": q.latitude,
-                    "lon": q.longitude,
-                    "product": product_id,
-                    "variables": q.variables,
-                    "maxLead": q.maxLeadTimeHours,
-                    "initTime": (q.initTime.isoformat() if q.initTime else None),
-                },
-                sort_keys=True,
+        async def fetch() -> Any:
+            collection = await upstream.get_json(
+                f"https://stac.dynamical.org/{quote(product_id)}/collection.json"
             )
+            return _map_options(product_id, collection)
 
-            async def fetch() -> dict[str, Any]:
-                payload = {"queries": [{"dataProductId": product_id, **payload_base}]}
-                data = await upstream.post_json("/forecasts", payload)
-                results = data.get("results") if isinstance(data, dict) else None
-                result = results[0] if results else None
-                if not isinstance(result, dict):
-                    raise UpstreamError(502, "empty upstream response")
-                result.setdefault("dataProduct", {"id": product_id})
-                result["status"] = "ok"
-                return result
+        try:
+            data, _ = await cache.get_or_fetch(f"map-product:{product_id}", fetch, 3600)
+        except UpstreamError as exc:
+            raise http_from_upstream(exc) from exc
+        return data
 
-            try:
-                value, _ = await cache.get_or_fetch(key, fetch)
-                return value
-            except UpstreamError as exc:
-                return {
-                    "product": product_id,
-                    "dataProduct": {"id": product_id},
-                    "status": "error",
-                    "code": exc.status_code,
-                    "error": exc.detail,
-                    "retryAfter": exc.retry_after,
-                }
-
-        results = await asyncio.gather(*(fetch_one(product_id) for product_id in q.products))
-        return {"results": list(results)}
+    @app.post("/api/point")
+    async def point(request: Request, q: PointQuery) -> dict[str, Any]:
+        return await request.app.state.forecast.point(q)
 
     @app.post("/api/analysis")
     async def analysis(request: Request, q: AnalysisQuery) -> dict[str, Any]:
-        cache: Cache = request.app.state.cache
-        upstream: UpstreamClient = request.app.state.upstream
-
-        payload_base: dict[str, Any] = {
-            "location": {
-                "latitude": q.latitude,
-                "longitude": q.longitude,
-            },
-            "variables": q.variables,
-            "startTime": q.startTime.isoformat(),
-            "endTime": q.endTime.isoformat(),
-        }
-
-        async def fetch_one(product_id: str) -> dict[str, Any]:
-            key = "analysis:" + json.dumps(
-                {
-                    "lat": q.latitude,
-                    "lon": q.longitude,
-                    "product": product_id,
-                    "variables": q.variables,
-                    "start": q.startTime.isoformat(),
-                    "end": q.endTime.isoformat(),
-                },
-                sort_keys=True,
-            )
-
-            async def fetch() -> dict[str, Any]:
-                payload = {"queries": [{"dataProductId": product_id, **payload_base}]}
-                data = await upstream.post_json("/analyses", payload)
-                results = data.get("results") if isinstance(data, dict) else None
-                result = results[0] if results else None
-                if not isinstance(result, dict):
-                    raise UpstreamError(502, "empty upstream response")
-                result.setdefault("dataProduct", {"id": product_id})
-                result["status"] = "ok"
-                return result
-
-            try:
-                value, _ = await cache.get_or_fetch(key, fetch)
-                return value
-            except UpstreamError as exc:
-                return {
-                    "product": product_id,
-                    "dataProduct": {"id": product_id},
-                    "status": "error",
-                    "code": exc.status_code,
-                    "error": exc.detail,
-                    "retryAfter": exc.retry_after,
-                }
-
-        results = await asyncio.gather(*(fetch_one(product_id) for product_id in q.products))
-        return {"results": list(results)}
+        return await request.app.state.forecast.analysis(q)
 
     return app
 

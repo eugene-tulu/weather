@@ -56,6 +56,20 @@ class Settings:
     circuit_open_seconds: float
     trust_proxy_headers: bool
     environment: str
+    database_url: str = "sqlite+aiosqlite:///./data/app.db"
+    redis_url: str = ""
+    admin_token: str = ""
+    require_auth: bool = False
+    mcp_cache_db_path: str = "mcp-cache.duckdb"
+    mcp_host: str = "0.0.0.0"
+    mcp_port: int = 8001
+    otel_endpoint: str | None = None
+    sentry_dsn: str | None = None
+    quota_default: int = 100_000
+    decision_products: tuple[str, ...] = (
+        "noaa-gfs-forecast",
+        "noaa-gefs-forecast-35-day",
+    )
 
 
 @lru_cache(maxsize=1)
@@ -78,4 +92,18 @@ def get_settings() -> Settings:
         circuit_open_seconds=_float("UPSTREAM_OPEN_SECONDS", 30.0),
         trust_proxy_headers=_bool("TRUST_PROXY_HEADERS", True),
         environment=os.getenv("ENVIRONMENT", "production"),
+        database_url=os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/app.db"),
+        redis_url=os.getenv("REDIS_URL", ""),
+        admin_token=os.getenv("ADMIN_TOKEN", ""),
+        require_auth=_bool("REQUIRE_AUTH", False),
+        mcp_cache_db_path=os.getenv("MCP_CACHE_DB_PATH", "mcp-cache.duckdb"),
+        mcp_host=os.getenv("MCP_HOST", "0.0.0.0"),
+        mcp_port=_int("MCP_PORT", 8001),
+        otel_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT") or None,
+        sentry_dsn=os.getenv("SENTRY_DSN") or None,
+        quota_default=_int("QUOTA_DEFAULT", 100_000),
+        decision_products=_origins(
+            "DECISION_PRODUCTS",
+            "noaa-gfs-forecast,noaa-gefs-forecast-35-day",
+        ),
     )

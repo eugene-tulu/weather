@@ -89,6 +89,9 @@ def test_point_validation(settings):
         unknown_variable = dict(POINT_BODY, variables=["nope"])
         assert client.post("/api/point", json=unknown_variable).status_code == 422
 
+        legacy_variable = dict(POINT_BODY, variables=["total_precipitation"])
+        assert client.post("/api/point", json=legacy_variable).status_code == 422
+
         bad_lead = dict(POINT_BODY, maxLeadTimeHours=0)
         assert client.post("/api/point", json=bad_lead).status_code == 422
 
@@ -215,6 +218,54 @@ def test_product_metadata(settings):
             assert unknown.status_code == 404
 
 
+MAP_COLLECTION = {
+    "id": "noaa-gfs-forecast-virtual",
+    "assets": {"icechunk-https": {"href": "https://example.com/data.icechunk"}},
+    "cube:variables": {
+        "temperature_2m": {
+            "dimensions": [
+                "init_time",
+                "lead_time",
+                "latitude",
+                "longitude",
+            ],
+            "long_name": "Temperature",
+            "unit": "degree_Celsius",
+        },
+        "pressure_level/cloud_cover": {
+            "dimensions": [
+                "init_time",
+                "lead_time",
+                "latitude",
+                "longitude",
+                "pressure_level",
+            ],
+            "unit": "percent",
+        },
+    },
+    "extent": {"spatial": {"bbox": [[-180, -90, 179.75, 90]]}},
+}
+
+
+def test_map_product_options(settings):
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://stac.dynamical.org/noaa-gfs-forecast-virtual/collection.json").mock(
+            return_value=httpx.Response(200, json=MAP_COLLECTION)
+        )
+
+        with app_client(settings) as client:
+            response = client.get("/api/map-product/noaa-gfs-forecast-virtual")
+            assert response.status_code == 200
+            body = response.json()
+            assert body["href"] == "https://example.com/data.icechunk"
+            assert [variable["name"] for variable in body["variables"]] == ["temperature_2m"]
+            assert body["defaultVariable"] == "temperature_2m"
+            assert body["initialView"]["bounds"] == [-180, -60, 180, 75]
+
+            unknown = client.get("/api/map-product/nope")
+            assert unknown.status_code == 404
+
+
 def test_health_metrics_and_security_headers(settings):
     with app_client(settings) as client:
         live = client.get("/health/live")
@@ -230,6 +281,10 @@ def test_health_metrics_and_security_headers(settings):
         metrics = client.get("/metrics")
         assert metrics.status_code == 200
         assert "cache_hits" in metrics.json()
+
+        prometheus = client.get("/prometheus/metrics")
+        assert prometheus.status_code == 200
+        assert "weather_http_requests_total" in prometheus.text
 
 
 def test_inbound_rate_limit(settings):

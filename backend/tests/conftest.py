@@ -29,6 +29,9 @@ def make_settings(tmp_path: Path, **overrides) -> Settings:
         circuit_open_seconds=1.0,
         trust_proxy_headers=True,
         environment="test",
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'app.db'}",
+        admin_token="test-admin",
+        require_auth=False,
     )
     return replace(settings, **overrides) if overrides else settings
 
