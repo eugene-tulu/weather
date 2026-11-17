@@ -1,4 +1,4 @@
-.PHONY: help backend-test backend-lint frontend-test frontend-lint frontend-build check compose-up compose-down
+.PHONY: help backend-test backend-lint frontend-test frontend-lint frontend-build check compose-up compose-down staging-up observability-up backup restore loadtest
 
 help:
 	@echo "backend-test    Run backend pytest in conda env ndvi"

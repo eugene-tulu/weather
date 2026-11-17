@@ -9,11 +9,48 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-weather}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-weather}"
+      POSTGRES_DB: "${POSTGRES_DB:-weather}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - weather
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-weather} -d ${POSTGRES_DB:-weather}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - weather
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+
   backend:
     build: ./backend
     depends_on:
       backend-init:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     expose:
       - "8000"
     environment:
@@ -24,6 +61,14 @@ services:
       RATE_LIMIT_PER_MINUTE: "${RATE_LIMIT_PER_MINUTE:-120}"
       OUTBOUND_RATE_PER_10S: "${OUTBOUND_RATE_PER_10S:-20}"
       OUTBOUND_RATE_PER_60S: "${OUTBOUND_RATE_PER_60S:-250}"
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-weather}:${POSTGRES_PASSWORD:-weather}@postgres:5432/${POSTGRES_DB:-weather}"
+      REDIS_URL: redis://redis:6379/0
+      ADMIN_TOKEN: "${ADMIN_TOKEN:-change-me}"
+      REQUIRE_AUTH: "true"
+      QUOTA_DEFAULT: "${QUOTA_DEFAULT:-100000}"
+      DECISION_PRODUCTS: "${DECISION_PRODUCTS:-noaa-gfs-forecast,noaa-gefs-forecast-35-day}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+      SENTRY_DSN: "${SENTRY_DSN:-}"
       ENVIRONMENT: production
     volumes:
       - backend_data:/data
@@ -48,7 +93,62 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  mcp:
+    build: ./backend
+    command: [".venv/bin/python", "mcp_server.py"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend-init:
+        condition: service_completed_successfully
+    expose:
+      - "8001"
+      - "9091"
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-weather}:${POSTGRES_PASSWORD:-weather}@postgres:5432/${POSTGRES_DB:-weather}"
+      REDIS_URL: redis://redis:6379/0
+      MCP_CACHE_DB_PATH: /data/mcp-cache.duckdb
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8001"
+      CACHE_TTL_SECONDS: "${CACHE_TTL_SECONDS:-600}"
+      CACHE_MAX_ROWS: "${CACHE_MAX_ROWS:-10000}"
+      OUTBOUND_RATE_PER_10S: "${OUTBOUND_RATE_PER_10S:-20}"
+      OUTBOUND_RATE_PER_60S: "${OUTBOUND_RATE_PER_60S:-250}"
+      DECISION_PRODUCTS: "${DECISION_PRODUCTS:-noaa-gfs-forecast,noaa-gefs-forecast-35-day}"
+      ENVIRONMENT: production
+    volumes:
+      - backend_data:/data
+    networks:
+      - weather
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; socket.create_connection(('127.0.0.1', 8001), 2).close()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     logging:
       driver: json-file
       options:
@@ -105,6 +205,8 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+      mcp:
+        condition: service_healthy
       frontend:
         condition: service_healthy
     networks:
@@ -136,5 +238,6 @@ networks:
 
 volumes:
   backend_data:
+  postgres_data:
   caddy_data:
   caddy_config:

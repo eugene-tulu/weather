@@ -1,0 +1,11 @@
+services:
+  backend:
+    environment:
+      ENVIRONMENT: staging
+      REQUIRE_AUTH: "true"
+  mcp:
+    environment:
+      ENVIRONMENT: staging
+  caddy:
+    environment:
+      DOMAIN: "${STAGING_DOMAIN:-staging.localhost}"
