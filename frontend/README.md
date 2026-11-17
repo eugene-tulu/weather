@@ -25,14 +25,21 @@ Open `http://localhost:3000`. For local development against a separately running
 
 ## Structure
 
-- `src/app/page.tsx` — page shell, state, URL sync, data fetching, charts, and tables.
+- `src/app/page.tsx` — point-forecast page shell, state, URL sync, data fetching, charts, and tables.
+- `src/app/map/page.tsx` — map-optimized dataset route.
+- `src/components/map/` — map view and on-demand Dynamical explorer mount.
 - `src/lib/types.ts` — API and view types.
-- `src/lib/models.ts` — model and variable metadata.
+- `src/lib/models.ts` — model, variable, and per-model variable availability metadata.
+- `src/lib/map-products.ts` — map-optimized product catalog.
 - `src/lib/normalize.ts` — API result normalization.
 - `src/lib/forecast.ts` — chart alignment, statistics, CSV export.
 - `src/lib/api.ts` — fetch helpers with timeout and abort handling.
 - `src/lib/stats.ts` — median, percentile, standard deviation, confidence primitives.
 - `tests/` — Vitest unit tests.
+
+## Map view
+
+`/map` lists global map-optimized Icechunk products. Selecting one fetches its STAC metadata through the backend, then loads the Dynamical deck.gl explorer on demand. The explorer bundle, S3 reads, and workers are allowed by the Caddy CSP; the backend remains the only API proxy for point data. The map is intentionally loaded only after a click so the point-forecast page stays light.
 
 ## Chart alignment
 

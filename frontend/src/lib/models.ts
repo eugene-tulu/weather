@@ -73,22 +73,89 @@ export const MODELS: ModelDef[] = [
 export const VARS: VariableDef[] = [
   { id: "temperature_2m", label: "Temperature", unit: "°C", scale: 10 },
   {
-    id: "total_precipitation",
-    label: "Total precip",
+    id: "precipitation_surface",
+    label: "Precip rate",
     unit: "kg m-2 s-1",
-    scale: 8,
+    scale: 0.005,
   },
   { id: "wind_speed", label: "Wind speed", unit: "m/s", scale: 8 },
-  { id: "cloud_cover", label: "Cloud cover", unit: "%", scale: 45 },
-  { id: "relative_humidity_2m", label: "Rel. humidity", unit: "%", scale: 25 },
-  { id: "surface_pressure", label: "Surface pressure", unit: "hPa", scale: 18 },
   {
-    id: "boundary_layer_height",
-    label: "Boundary layer",
-    unit: "m",
-    scale: 500,
+    id: "total_cloud_cover_atmosphere",
+    label: "Cloud cover",
+    unit: "%",
+    scale: 45,
   },
+  { id: "relative_humidity_2m", label: "Rel. humidity", unit: "%", scale: 25 },
+  { id: "pressure_surface", label: "Surface pressure", unit: "Pa", scale: 500 },
 ];
+
+// Surface variables available in the Dynamical point API for each product.
+// Source: https://stac.dynamical.org/{productId}/collection.json (cube:variables).
+// wind_speed is derived from wind_u_10m + wind_v_10m.
+export const MODEL_VARIABLES: Record<string, string[]> = {
+  "noaa-gfs-forecast": [
+    "temperature_2m",
+    "precipitation_surface",
+    "wind_speed",
+    "total_cloud_cover_atmosphere",
+    "relative_humidity_2m",
+    "pressure_surface",
+  ],
+  "noaa-hrrr-forecast-48-hour": [
+    "temperature_2m",
+    "precipitation_surface",
+    "wind_speed",
+    "total_cloud_cover_atmosphere",
+    "relative_humidity_2m",
+    "pressure_surface",
+  ],
+  "ecmwf-aifs-single-forecast": [
+    "temperature_2m",
+    "precipitation_surface",
+    "wind_speed",
+    "total_cloud_cover_atmosphere",
+    "pressure_surface",
+  ],
+  "dwd-icon-eu-forecast-5-day": [
+    "temperature_2m",
+    "precipitation_surface",
+    "wind_speed",
+    "total_cloud_cover_atmosphere",
+    "relative_humidity_2m",
+    "pressure_surface",
+  ],
+  "noaa-gefs-forecast-35-day": [
+    "temperature_2m",
+    "precipitation_surface",
+    "wind_speed",
+    "total_cloud_cover_atmosphere",
+    "relative_humidity_2m",
+    "pressure_surface",
+  ],
+  "ecmwf-ifs-ens-forecast-15-day-0-25-degree": [
+    "temperature_2m",
+    "precipitation_surface",
+    "wind_speed",
+    "total_cloud_cover_atmosphere",
+    "pressure_surface",
+  ],
+  "noaa-gfs-analysis": [
+    "temperature_2m",
+    "precipitation_surface",
+    "wind_speed",
+    "total_cloud_cover_atmosphere",
+    "relative_humidity_2m",
+    "pressure_surface",
+  ],
+  "noaa-hrrr-analysis": [
+    "temperature_2m",
+    "precipitation_surface",
+    "wind_speed",
+    "total_cloud_cover_atmosphere",
+    "relative_humidity_2m",
+    "pressure_surface",
+  ],
+};
 
 export function modelLabel(id: string) {
   return MODELS.find((m) => m.id === id)?.label || id;

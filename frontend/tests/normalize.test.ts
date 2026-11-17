@@ -23,6 +23,21 @@ describe("normalizeResult", () => {
     expect(normalized._ensemble).toBeNull();
   });
 
+  it("derives deterministic wind speed from u/v components", () => {
+    const result: ApiResult = {
+      dataProduct: { id: "gfs" },
+      forecasts: [
+        {
+          initTime: "2026-01-01T00:00:00Z",
+          validTimes: ["2026-01-01T00:00:00Z"],
+          data: { wind_u_10m: [3], wind_v_10m: [4] },
+        },
+      ],
+    };
+
+    expect(normalizeResult(result)._data.wind_speed).toEqual([5]);
+  });
+
   it("normalizes an ensemble forecast", () => {
     const result: ApiResult = {
       dataProduct: { id: "gefs" },

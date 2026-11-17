@@ -85,3 +85,30 @@ export interface Stats {
 export interface RunOption {
   initTime: string;
 }
+
+export interface MapVariable {
+  path: string;
+  name: string;
+  long_name: string;
+  units: string;
+  dims: string[];
+}
+
+export interface MapProductOptions {
+  id: string;
+  href: string;
+  variables: MapVariable[];
+  defaultVariable: string;
+  initialView: { bounds: number[] };
+  proj4: unknown;
+  virtual: boolean;
+}
+
+export interface MapProduct {
+  id: string;
+  label: string;
+  description: string;
+  domain: string;
+  resolution: string;
+  cadence: string;
+}

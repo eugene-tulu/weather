@@ -2,6 +2,7 @@
 
 /* eslint-disable react-hooks/set-state-in-effect -- URL, theme, and external fetch state are synchronized from effects */
 
+import Link from "next/link";
 import {
   Fragment,
   useCallback,
@@ -20,7 +21,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { ApiError, fetchAnalysis, fetchForecast, fetchGeocode, fetchRuns } from "@/lib/api";
 import { buildChartData, computeStats, formatRunAge, toCsv, valueAtTime } from "@/lib/forecast";
-import { COLORS, MODELS, VARS, modelLabel } from "@/lib/models";
+import { COLORS, MODEL_VARIABLES, MODELS, VARS, modelLabel } from "@/lib/models";
 import { normalizeResult } from "@/lib/normalize";
 import type { ApiResult, GeocodeResult, NormalizedResult, RunOption } from "@/lib/types";
 import { useFocusTrap } from "@/lib/useFocusTrap";
@@ -65,6 +66,21 @@ export default function Page() {
   const previousPrimary = useRef<string | undefined>(undefined);
 
   const varMeta = VARS.find((v) => v.id === variable) || VARS[0];
+
+  const availableVariableIds = useMemo(() => {
+    const available = new Set<string>();
+    for (const entry of VARS) {
+      if (models.some((id) => MODEL_VARIABLES[id]?.includes(entry.id))) {
+        available.add(entry.id);
+      }
+    }
+    return available;
+  }, [models]);
+
+  const unsupportedSelected = useMemo(
+    () => models.filter((id) => !MODEL_VARIABLES[id]?.includes(variable)).map(modelLabel),
+    [models, variable],
+  );
 
   const results = useMemo<NormalizedResult[]>(
     () =>
@@ -253,6 +269,18 @@ export default function Page() {
   }, [maxLead, models]);
 
   useEffect(() => {
+    if (!models.length || availableVariableIds.has(variable)) return;
+    const fallback = availableVariableIds.has("temperature_2m")
+      ? "temperature_2m"
+      : VARS.find((entry) => availableVariableIds.has(entry.id))?.id;
+    if (!fallback) return;
+    setVariable(fallback);
+    setNotice(
+      `Switched to ${VARS.find((entry) => entry.id === fallback)?.label}: ${varMeta.label} is not available for the selected models.`,
+    );
+  }, [availableVariableIds, models, variable, varMeta.label]);
+
+  useEffect(() => {
     const query = q.trim();
     if (query.length < 2) {
       setSuggestions([]);
@@ -309,8 +337,12 @@ export default function Page() {
         setError(null);
         setData(null);
 
-        const forecastModels = models.filter((id) => !id.includes("analysis"));
-        const analysisModels = models.filter((id) => id.includes("analysis"));
+        const forecastModels = models.filter(
+          (id) => !id.includes("analysis") && MODEL_VARIABLES[id]?.includes(variable),
+        );
+        const analysisModels = models.filter(
+          (id) => id.includes("analysis") && MODEL_VARIABLES[id]?.includes(variable),
+        );
         const fetchVariables =
           variable === "wind_speed" ? ["wind_u_10m", "wind_v_10m"] : [variable];
         const initTime = snapshot === "latest" ? undefined : snapshot;
@@ -508,6 +540,12 @@ export default function Page() {
             </div>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            <Link
+              href="/map"
+              className="hidden h-8 items-center rounded-md border border-border px-3 text-sm font-medium hover:bg-accent/10 focus-visible:ring-2 focus-visible:ring-ring sm:inline-flex"
+            >
+              Map
+            </Link>
             <Button variant="outline" size="sm" onClick={() => setShowHowTo(true)}>
               How to read this
             </Button>
@@ -656,21 +694,36 @@ export default function Page() {
                   Variable
                 </div>
                 <div className="grid grid-cols-2 gap-1">
-                  {VARS.map((entry) => (
-                    <button
-                      key={entry.id}
-                      type="button"
-                      onClick={() => setVariable(entry.id)}
-                      className={`text-xs px-2 py-1 rounded border focus-visible:ring-2 focus-visible:ring-ring ${
-                        variable === entry.id
-                          ? "bg-primary text-primary-foreground border-primary"
-                          : "border-border hover:bg-accent/10"
-                      }`}
-                    >
-                      {entry.label}
-                    </button>
-                  ))}
+                  {VARS.map((entry) => {
+                    const available = availableVariableIds.has(entry.id);
+                    return (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        disabled={!available}
+                        onClick={() => available && setVariable(entry.id)}
+                        title={
+                          available
+                            ? entry.label
+                            : `${entry.label} is not provided by the selected models`
+                        }
+                        className={`text-xs px-2 py-1 rounded border focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-35 ${
+                          variable === entry.id
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "border-border hover:bg-accent/10"
+                        }`}
+                      >
+                        {entry.label}
+                      </button>
+                    );
+                  })}
                 </div>
+                {unsupportedSelected.length > 0 && (
+                  <div className="text-[10.5px] text-muted-foreground mt-1">
+                    {unsupportedSelected.join(", ")} excluded: this dataset has no{" "}
+                    {varMeta.label.toLowerCase()}.
+                  </div>
+                )}
               </div>
 
               <div>
@@ -1268,6 +1321,9 @@ export default function Page() {
             .
           </span>
           <span>Licenses vary by model; see the catalog.</span>
+          <Link href="/map" className="underline">
+            Map view
+          </Link>
           <button
             type="button"
             className="underline focus-visible:ring-2 focus-visible:ring-ring"

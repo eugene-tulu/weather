@@ -136,3 +136,160 @@
     @apply font-sans;
   }
 }
+
+.font-display {
+  font-family: var(--font-space-grotesk), var(--font-geist-sans), sans-serif;
+}
+
+.font-label {
+  font-family: var(--font-dm-mono), var(--font-geist-mono), monospace;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.map-page {
+  position: relative;
+  overflow-x: hidden;
+  color-scheme: dark;
+  background:
+    radial-gradient(ellipse at 67% 18%, rgba(20, 67, 108, 0.28), transparent 25rem),
+    radial-gradient(ellipse at 22% 72%, rgba(30, 90, 118, 0.1), transparent 34rem), #02040a;
+}
+
+.map-page::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.55;
+  background-image:
+    radial-gradient(1px 1px at 8% 12%, #d9f5ff, transparent 1.6px),
+    radial-gradient(1px 1px at 21% 71%, #79bce8, transparent 1.5px),
+    radial-gradient(1px 1px at 37% 28%, #d9f5ff, transparent 1.4px),
+    radial-gradient(1px 1px at 52% 84%, #8ed6f6, transparent 1.5px),
+    radial-gradient(1px 1px at 67% 16%, #d9f5ff, transparent 1.6px),
+    radial-gradient(1px 1px at 83% 62%, #8ed6f6, transparent 1.3px),
+    radial-gradient(1px 1px at 94% 33%, #d9f5ff, transparent 1.5px);
+  background-size:
+    290px 240px,
+    340px 310px,
+    400px 360px,
+    370px 290px,
+    450px 380px,
+    320px 260px,
+    520px 440px;
+}
+
+.map-card {
+  background: rgba(9, 25, 31, 0.82);
+  border: 1px solid rgba(134, 228, 199, 0.15);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(10px);
+}
+
+.map-display {
+  font-family: var(--font-space-grotesk), var(--font-geist-sans), sans-serif;
+}
+
+.map-label {
+  font-family: var(--font-dm-mono), var(--font-geist-mono), monospace;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.map-select {
+  width: 100%;
+  border: 1px solid rgba(134, 228, 199, 0.2);
+  border-radius: 5px;
+  background: #0d2228;
+  color: #e8f5ef;
+  padding: 0.65rem 0.75rem;
+  font-size: 0.8rem;
+  outline: none;
+}
+
+.map-select:focus-visible {
+  border-color: #86e4c7;
+  box-shadow: 0 0 0 2px rgba(134, 228, 199, 0.16);
+}
+
+.map-select:disabled {
+  opacity: 0.45;
+}
+
+.map-button {
+  border: 0;
+  border-radius: 5px;
+  background: #9deccf;
+  color: #08201e;
+  padding: 0.75rem 1.1rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.map-button:hover:not(:disabled) {
+  background: #bdf7e2;
+}
+
+.map-button:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.brand-mark {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  transform: rotate(-26deg);
+}
+
+.brand-mark span {
+  display: block;
+  width: 4px;
+  border-radius: 999px;
+  background: #7fe2c5;
+}
+
+.brand-mark span:nth-child(1) {
+  height: 10px;
+  opacity: 0.45;
+}
+
+.brand-mark span:nth-child(2) {
+  height: 16px;
+  opacity: 0.75;
+}
+
+.brand-mark span:nth-child(3) {
+  height: 20px;
+}
+
+.map-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #80e6c5;
+  box-shadow: 0 0 0 3px rgba(128, 230, 197, 0.1);
+}
+
+.map-preview-grid {
+  background-image:
+    linear-gradient(rgba(112, 199, 176, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(112, 199, 176, 0.08) 1px, transparent 1px),
+    radial-gradient(circle at 50% 48%, rgba(35, 103, 147, 0.25), transparent 42%);
+  background-size:
+    40px 40px,
+    40px 40px,
+    100% 100%;
+}
+
+@media (max-width: 640px) {
+  .map-page::before {
+    opacity: 0.35;
+  }
+}

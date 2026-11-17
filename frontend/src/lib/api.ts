@@ -1,4 +1,4 @@
-import type { ApiResult, GeocodeResult, RunOption } from "./types";
+import type { ApiResult, GeocodeResult, MapProductOptions, RunOption } from "./types";
 
 const API = (process.env.NEXT_PUBLIC_API_BASE ?? "").replace(/\/$/, "");
 
@@ -157,4 +157,11 @@ export function fetchGeocode(
   signal?: AbortSignal,
 ): Promise<{ results?: GeocodeResult[] }> {
   return fetchJson(`/api/geocode?q=${encodeURIComponent(query)}`, { signal }, 10_000);
+}
+
+export function fetchMapProduct(
+  productId: string,
+  signal?: AbortSignal,
+): Promise<MapProductOptions> {
+  return fetchJson(`/api/map-product/${encodeURIComponent(productId)}`, { signal }, 20_000);
 }

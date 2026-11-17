@@ -20,7 +20,10 @@ export function normalizeResult(r: ApiResult): NormalizedResult {
 
   const f = r.forecasts?.[0];
   const times = f?.validTimes || r.analysisTimes || [];
-  const data = f?.data || r.data || {};
+  const data = { ...(f?.data || r.data || {}) };
+  if (data.wind_u_10m && data.wind_v_10m && !data.wind_speed) {
+    data.wind_speed = deriveWindSpeed(data.wind_u_10m, data.wind_v_10m);
+  }
   const ens: EnsembleMember[] | null = f?.ensembleMembers || null;
 
   return { ...r, _times: times, _data: data, _ensemble: ens };
