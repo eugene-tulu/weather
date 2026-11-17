@@ -8,9 +8,12 @@ The frontend is a Next.js 16 / React 19 / Recharts app. The backend is a FastAPI
 
 ```bash
 cp .env.example .env
-# Set DOMAIN to a hostname you control (required for a publicly trusted TLS certificate).
+# Set DOMAIN to a hostname you control (required for a publicly trusted TLS certificate),
+# plus POSTGRES_PASSWORD and ADMIN_TOKEN.
 docker compose up --build
 ```
+
+Services: `postgres`, `redis`, `backend` (REST/decision/admin), `mcp` (streamable HTTP MCP), `frontend`, and `caddy`. The admin console is at `/admin`; the MCP endpoint is at `/mcp`; the REST decision API is under `/v1`.
 
 Caddy terminates TLS and is the only service that publishes ports 80/443. The backend and frontend are reachable only on the internal Docker network. The frontend calls the backend same-origin at `/api`.
 
@@ -56,6 +59,13 @@ For local development against a separately running backend, set `NEXT_PUBLIC_API
 | `CACHE_DB_PATH` | `cache.duckdb` | DuckDB cache path. Docker uses `/data/cache.duckdb`. |
 | `CACHE_TTL_SECONDS` | `600` | Response cache TTL. |
 | `CACHE_MAX_ROWS` | `10000` | Maximum cache rows before LRU pruning. |
+| `DATABASE_URL` | `sqlite+aiosqlite:///./data/app.db` | Tenant/site/usage/calibration database. Docker uses Postgres. |
+| `REDIS_URL` | empty | Enables the shared Redis rate limiter. |
+| `ADMIN_TOKEN` | empty | Enables `/admin`; set this in production. |
+| `QUOTA_DEFAULT` | `100000` | Default monthly unit quota for new organizations. |
+| `MCP_PORT` | `8001` | MCP streamable HTTP port. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Enables OTLP tracing. |
+| `SENTRY_DSN` | empty | Enables Sentry error tracking. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Inbound requests per client IP per minute. |
 | `OUTBOUND_RATE_PER_10S` | `20` | Maximum upstream requests per 10 seconds. |
 | `OUTBOUND_RATE_PER_60S` | `250` | Maximum upstream requests per 60 seconds. |
@@ -79,8 +89,42 @@ See `backend/.env.example` for a complete backend template.
 | `GET` | `/api/runs` | Forecast runs for a product. |
 | `GET` | `/api/geocode` | City search. |
 | `GET` | `/api/product/{product_id}` | Data-product metadata. |
+| `GET` | `/api/map-product/{product_id}` | Map-optimized virtual dataset options from STAC. |
 | `POST` | `/api/point` | Batch point forecast. |
 | `POST` | `/api/analysis` | Batch analysis window (max 31 days). |
+| `POST` | `/mcp` | Streamable HTTP MCP tools. |
+| `GET` | `/admin` | Admin console for organizations, API keys, quotas, and usage. |
+| `GET`/`POST` | `/v1/sites` | Site CRUD for the API key's organization. |
+| `POST` | `/v1/sites/{id}/forecast` | Decision forecast with confidence and provenance. |
+| `POST` | `/v1/sites/{id}/workability` | Ranked workability windows for an operation. |
+| `POST` | `/v1/sites/{id}/risk` | Weather risk flags. |
+| `GET` | `/v1/usage` | Monthly usage and quota. |
+| `GET` | `/prometheus/metrics` | Prometheus metrics. |
+
+The web map lives at `/map` and renders the catalog's map-optimized Icechunk virtual datasets with the Dynamical deck.gl explorer. It is loaded on demand and uses spatial reads rather than the point API.
+
+Variable availability differs by product. The UI disables surface variables a model does not provide and excludes unsupported models from a request instead of failing the batch.
+
+## Decision layer and MCP
+
+Sites belong to organizations and carry latitude, longitude, timezone, and an operation profile. The decision engine builds hourly series from GFS + GEFS, computes confidence from model spread, and evaluates operations such as `earthworks`, `concrete_pour`, `crane_lift`, `spraying`, `planting`, `harvest`, and `mining`.
+
+MCP tools: `list_sites`, `get_site`, `forecast_site`, `workability_window`, `risk_flags`, `get_usage`, `get_operations`, `get_data_provenance`. Every tool requires an `X-API-Key` or bearer token and records usage against the organization's monthly quota.
+
+Create an organization and key from `/admin` or with the admin API, then use:
+
+```bash
+curl https://$DOMAIN/v1/sites -H "X-API-Key: $API_KEY"
+```
+
+## Calibration, observability, and staging
+
+- Forecast samples are persisted when decisions run; observations posted to `/v1/sites/{id}/observations` are joined into MAE/RMSE/bias/Brier/reliability reports at `/v1/sites/{id}/calibration`.
+- `python backend/calibration.py <csv>` runs the standalone harness.
+- `docker compose -f docker-compose.yml -f docker-compose.observability.yml up` adds Prometheus, Grafana, and Jaeger. Backend metrics are at `/prometheus/metrics`; the MCP process exposes metrics on `9091`.
+- `docker compose -f docker-compose.yml -f docker-compose.staging.yml up --build` starts the staging overlay.
+- `./scripts/backup.sh` and `./scripts/restore.sh <file>` handle Postgres backups. DuckDB is only a cache and can be rebuilt.
+- `k6 run loadtest/k6.js` runs the smoke load test; set `BASE_URL`, `VUS`, `DURATION`, and optionally `API_KEY`.
 
 Validation is enforced server-side: latitude/longitude bounds, product and variable allowlists, 1–25 variables, 1–10 products, `maxLeadTimeHours` 1–840, timezone-aware timestamps, and a 31-day analysis window.
 

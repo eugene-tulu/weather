@@ -12,6 +12,10 @@ Data is accessed through the [Dynamical point API](https://dynamical.org/api/), 
 
 The app displays model names and values for exploration and comparison. It does not claim that any model is "correct"; forecasts can all be wrong in the same direction.
 
+## Map explorer
+
+The `/map` view mounts the Dynamical map explorer bundle from `https://dynamical.org/explorer/explorer.js` and reads the catalog's map-optimized Icechunk virtual datasets from the public AWS Open Data buckets. The bundle is not vendored into this repository; Dynamical serves it with a permissive CORS policy. Dataset licenses and attribution are those of the individual catalog entries.
+
 ## Geocoding
 
 City search uses [Open-Meteo's geocoding API](https://open-meteo.com/), which is generally available under CC-BY-4.0. Confirm the current terms before redistribution.
